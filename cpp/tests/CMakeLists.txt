@@ -1,0 +1,8 @@
+add_subdirectory(simulator)
+add_subdirectory(fix)
+add_subdirectory(ingestion)
+add_subdirectory(orderbook)
+add_subdirectory(detectors)
+add_subdirectory(db)
+add_subdirectory(api)
+add_subdirectory(harness)

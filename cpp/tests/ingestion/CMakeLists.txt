@@ -1,0 +1,3 @@
+add_executable(ingestion_tests ingestion_test.cpp)
+target_link_libraries(ingestion_tests PRIVATE tse_ingestion GTest::gtest_main)
+gtest_discover_tests(ingestion_tests)

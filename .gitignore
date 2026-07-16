@@ -1,0 +1,31 @@
+# CMake build directories
+build-*/
+build/
+compile_commands.json
+CMakeUserPresets.json
+
+# C++
+*.o
+*.a
+*.so
+*.dylib
+
+# Python
+ml_service/venv/
+ml_service/.venv/
+ml_service/__pycache__/
+ml_service/**/__pycache__/
+ml_service/*.egg-info/
+ml_service/.pytest_cache/
+
+# Node / React
+dashboard/node_modules/
+dashboard/dist/
+dashboard/build/
+dashboard/.vite/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
