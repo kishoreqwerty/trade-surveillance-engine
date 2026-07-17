@@ -119,11 +119,32 @@ private:
     void handle_replace(const tse::orderbook::OrderBook& book, const tse::fix::Order& order);
     void handle_execution(const tse::fix::Execution& execution);
     std::vector<Alert> handle_cancel(const tse::orderbook::OrderBook& book, const tse::fix::Order& order);
+
+    // erase_tracked() removes tracked_[order_id] (if present) and keeps
+    // concurrent_count_by_key_ in sync in the same step -- every erase of a
+    // TrackedOrder must go through this, not tracked_.erase() directly, or
+    // the two data structures drift apart. Returns the erased entry, or
+    // std::nullopt if order_id wasn't tracked.
+    std::optional<TrackedOrder> erase_tracked(const std::string& order_id);
+
     int count_concurrent_same_account_same_side(const std::string& account_id, const std::string& instrument_id,
                                                  tse::fix::Side side) const;
 
     SpoofingLayeringConfig config_;
     std::unordered_map<std::string, TrackedOrder> tracked_;
+
+    // Incrementally-maintained count of resting orders per (account,
+    // instrument, side) -- what count_concurrent_same_account_same_side()
+    // actually reads. Added after Phase 6's sustained-load measurement
+    // showed the original implementation (a full linear scan over all of
+    // tracked_ on every single Cancel) had a heavy latency tail: tracked_
+    // can hold thousands of entries across a multi-hour, multi-instrument
+    // session, and every one of those entries was being examined on every
+    // cancel regardless of relevance. Key: account_id + "|" + instrument_id
+    // + "|" + side. See track_new()/erase_tracked() for where this is kept
+    // in sync -- every insertion/removal of a TrackedOrder must go through
+    // exactly those two functions, never touch tracked_ directly elsewhere.
+    std::unordered_map<std::string, int> concurrent_count_by_key_;
 };
 
 }  // namespace tse::detectors

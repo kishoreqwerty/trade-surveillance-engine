@@ -9,8 +9,23 @@ TEST(SpscRingBuffer, RejectsNonPowerOfTwoCapacity) {
     EXPECT_THROW(SpscRingBuffer<int>(3), std::invalid_argument);
     EXPECT_THROW(SpscRingBuffer<int>(5), std::invalid_argument);
     EXPECT_THROW(SpscRingBuffer<int>(100), std::invalid_argument);
-    EXPECT_NO_THROW(SpscRingBuffer<int>(1));
+    EXPECT_THROW(SpscRingBuffer<int>(1), std::invalid_argument);  // see below, and spsc_ring_buffer.hpp
+    EXPECT_NO_THROW(SpscRingBuffer<int>(2));
     EXPECT_NO_THROW(SpscRingBuffer<int>(64));
+}
+
+// capacity == 1 used to be accepted (this test asserted EXPECT_NO_THROW
+// for it) but was never actually exercised with real push/pop traffic by
+// any test -- only construction. It's rejected as of the Phase 6
+// sequence-number rewrite: at capacity 1, the "just published index N"
+// marker and the "vacated, ready for index N+1" marker are numerically
+// identical (both N+1, since every index maps to the same single physical
+// cell), so push() would silently overwrite unconsumed data without ever
+// reclaiming it or counting it as dropped. Found by manual trace while
+// building HighContentionWraparoundRegressionForBug3 below, not by a
+// failing test. See cpp/ingestion/README.md.
+TEST(SpscRingBuffer, CapacityOneIsRejectedNotJustDiscouraged) {
+    EXPECT_THROW(SpscRingBuffer<int>(1), std::invalid_argument);
 }
 
 TEST(SpscRingBuffer, EmptyBufferPopReturnsFalse) {

@@ -56,6 +56,9 @@ void SurveillanceFixApplication::fromApp(const FIX::Message& message, const FIX:
 
 void SurveillanceFixApplication::onMessage(const FIX42::NewOrderSingle& message, const FIX::SessionID&) {
     Order order = from_new_order_single(message);
+    if (event_sink_ != nullptr) {
+        event_sink_->on_order(order);
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     received_orders_.push_back(std::move(order));
     cv_.notify_all();
@@ -63,6 +66,9 @@ void SurveillanceFixApplication::onMessage(const FIX42::NewOrderSingle& message,
 
 void SurveillanceFixApplication::onMessage(const FIX42::OrderCancelRequest& message, const FIX::SessionID&) {
     Order order = from_order_cancel_request(message);
+    if (event_sink_ != nullptr) {
+        event_sink_->on_order(order);
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     received_orders_.push_back(std::move(order));
     cv_.notify_all();
@@ -70,6 +76,9 @@ void SurveillanceFixApplication::onMessage(const FIX42::OrderCancelRequest& mess
 
 void SurveillanceFixApplication::onMessage(const FIX42::ExecutionReport& message, const FIX::SessionID&) {
     Execution execution = from_execution_report(message);
+    if (event_sink_ != nullptr) {
+        event_sink_->on_execution(execution);
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     received_executions_.push_back(std::move(execution));
     cv_.notify_all();

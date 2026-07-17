@@ -179,3 +179,76 @@ TEST(TwoThreadPipeline, SustainedLoadWithConsumerKeepingUpDropsNothing) {
         EXPECT_EQ(received[static_cast<std::size_t>(i)], i);
     }
 }
+
+// Regression test targeting Bug 3 by name (see cpp/ingestion/README.md and
+// spsc_ring_buffer.hpp's class comment): a losing CAS attempt's speculative
+// read racing a *different*, winning thread's *later* write to the same
+// physical slot after wraparound. Phase 6's sustained-load pipeline test
+// (cpp/tests/pipeline/live_consumer_sustained_load_test.cpp) is what
+// actually caught this originally, but only incidentally, at a scale and
+// timing shape driven by realistic order-flow data — a future regression
+// back toward a copy-before-CAS (or any other non-per-slot-sequence-
+// numbered) design isn't guaranteed to be caught reliably by that test's
+// specific shape. This test exists to hit the exact window by construction,
+// not by luck: capacity 2 is the smallest legal value (see
+// spsc_ring_buffer.hpp for why capacity 1 is rejected outright), so *every*
+// push past the first two forces an immediate reclaim contending directly
+// with the consumer for the exact same physical slot, and a high,
+// unpaced iteration count maximizes how many times that contention happens
+// per second of wall-clock time — the more often the claim protocol's
+// losing-read/winning-write handoff executes, the more chances TSan gets to
+// observe it. (The consumer's busy-wait still yields, for scheduler safety
+// on constrained/single-core environments — that doesn't reduce
+// contention, since the race window lives inside the claim operation
+// itself, not the idle wait between attempts.)
+TEST(TwoThreadPipeline, HighContentionWraparoundRegressionForBug3) {
+    constexpr int64_t kTotalEvents = 500'000;
+    constexpr std::size_t kCapacity = 2;  // smallest legal capacity -- maximizes reclaim contention frequency
+
+    SpscRingBuffer<IngestionEvent> buffer(kCapacity);
+    std::atomic<bool> producer_done{false};
+
+    std::thread producer([&] {
+        for (int64_t seq = 0; seq < kTotalEvents; ++seq) {
+            buffer.push(make_sequenced_order(seq));  // deliberately unpaced -- maximize reclaim frequency
+        }
+        producer_done.store(true, std::memory_order_release);
+    });
+
+    std::vector<int64_t> received;
+    received.reserve(kTotalEvents);
+
+    std::thread consumer([&] {
+        IngestionEvent event;
+        while (true) {
+            if (buffer.pop(event)) {
+                received.push_back(std::get<Order>(event).qty);
+                continue;
+            }
+            if (producer_done.load(std::memory_order_acquire)) {
+                if (buffer.pop(event)) {
+                    received.push_back(std::get<Order>(event).qty);
+                    continue;
+                }
+                break;
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    producer.join();
+    consumer.join();
+
+    EXPECT_EQ(static_cast<int64_t>(received.size()) + static_cast<int64_t>(buffer.dropped_count()),
+              kTotalEvents);
+    for (std::size_t i = 1; i < received.size(); ++i) {
+        ASSERT_GT(received[i], received[i - 1]) << "ordering violated at index " << i;
+    }
+    for (int64_t value : received) {
+        ASSERT_GE(value, 0);
+        ASSERT_LT(value, kTotalEvents);
+    }
+    // At capacity 2 with 500,000 unpaced pushes, the drop-oldest reclaim
+    // path -- exactly where Bug 3 lived -- runs essentially continuously.
+    EXPECT_GT(buffer.dropped_count(), 0u);
+}

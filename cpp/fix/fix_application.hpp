@@ -13,6 +13,7 @@
 #include <mutex>
 #include <vector>
 
+#include "event_sink.hpp"
 #include "types.hpp"
 
 namespace tse::fix {
@@ -75,6 +76,16 @@ public:
     // direct evidence that QuickFIX's own gap-recovery machinery fired.
     int resend_requests_seen() const { return resend_requests_seen_; }
 
+    // Phase 6's live-wiring hook. Not owned; caller (cpp/pipeline/) must
+    // outlive this object. Called from whatever thread QuickFIX invokes
+    // onMessage on, outside received_orders_/received_executions_'s mutex —
+    // see fix_application.cpp's onMessage bodies for why (keeps the sink
+    // call off that lock, since a real sink does hot-path work of its own).
+    // Purely additive: existing tests that never call this still see the
+    // exact same received_orders()/received_executions() behavior as
+    // before this existed.
+    void set_event_sink(IEventSink* sink) { event_sink_ = sink; }
+
 private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;
@@ -83,6 +94,7 @@ private:
     std::vector<Order> received_orders_;
     std::vector<Execution> received_executions_;
     std::atomic<int> resend_requests_seen_{0};
+    IEventSink* event_sink_{nullptr};
 };
 
 #if defined(__clang__)

@@ -23,48 +23,85 @@ namespace tse::ingestion {
 // behind this buffer — see kafka_producer.hpp) remains the complete,
 // replayable record regardless of what this buffer had to discard.
 //
-// Concurrency design: `head_` and `tail_` are monotonically increasing
-// indices (never reset, only ever masked with `mask_` when indexing into
-// storage). The producer is the only writer of `tail_` in the common case;
-// the consumer is the only writer of `head_` in the common case. The one
-// case where both sides could touch the same slot — the producer needing
-// to reclaim the oldest element when full — is arbitrated by a
-// compare_exchange loop on `head_` shared between push()'s reclaim path and
-// pop() (see try_claim_front()): whichever side's CAS wins is the only one
-// that ever touches that slot's value, which is what gives this a genuine
-// happens-before edge (not just an atomic-index guarantee).
+// Concurrency design: Vyukov-style per-slot sequence numbers, not raw
+// head_/tail_ index comparisons around a shared data array. This is a
+// Phase 6 rewrite, replacing a Phase 3 design (copy-the-value-before-CAS)
+// that was proven wrong by Phase 6's own sustained-load test, not a
+// preemptive rewrite — see "Why the Phase 3 design wasn't enough" below.
 //
-// That CAS arbitration is necessary but not sufficient on its own: push()
-// must keep reclaiming (looping on a fresh acquire-read of head_, not just
-// attempting a single reclaim) until head_ has specifically moved past the
-// logical index that maps to the slot it's about to overwrite — a single
-// reclaim can claim a *different* front element than the one occupying
-// that slot if the consumer makes concurrent progress in between. An
-// earlier version of this class got that wrong (reclaimed once and assumed
-// it was the right slot) and TSan caught the resulting race under
-// sustained two-thread load — see cpp/ingestion/README.md and
-// cpp/tests/ingestion/two_thread_pipeline_test.cpp, which is what
-// reproduces it.
+// Each Cell carries its own `sequence` atomic alongside its `data`. A
+// producer targeting logical index `pos` only writes once
+// `cell.sequence.load(acquire) == pos` (the slot has been vacated for
+// exactly this position, not just "some" position), then publishes via
+// `cell.sequence.store(pos + 1, release)`. A consumer (or push()'s
+// drop-oldest reclaim — see try_claim_front(), used by both) only reads
+// once `cell.sequence.load(acquire) == pos + 1` (the producer's publish is
+// visible), then frees the slot for the *next* wraparound via
+// `cell.sequence.store(pos + capacity_, release)`. head_/tail_ still exist
+// as monotonic position counters for arbitrating *which* logical index
+// each side is working on (via a CAS on head_, exactly as before, shared
+// between pop() and push()'s reclaim path) — but they no longer carry the
+// data-safety synchronization themselves; the per-cell sequence does that.
 //
-// A second, subtler bug in the same area (also TSan-caught, also detailed
-// in the README) was try_claim_front() moving a slot's value out *after*
-// winning the CAS on head_ instead of *before* — see that function's
-// comment for why the ordering matters and why the fix requires T to be
-// CopyConstructible (in addition to DefaultConstructible, needed for the
-// backing array), not just MoveConstructible.
+// Why the Phase 3 design wasn't enough: it relied on a losing CAS attempt
+// in try_claim_front() being harmless because the loser only read a copy,
+// never wrote. That's true for the *logical* index the loser and winner
+// were both contending for — but it missed a second scenario: a claim
+// attempt's speculative read (`T candidate = buffer_[h & mask_]`, taken
+// *before* attempting the CAS) can race against a *different* thread's
+// write to that same *physical* slot for a *later* logical index, once
+// that later index has wrapped around to reuse the slot. A losing
+// `compare_exchange_weak` only provides `memory_order_relaxed` semantics
+// on failure — it does not synchronize-with whatever the *winning* thread
+// does afterward, so nothing ordered the loser's already-completed read
+// against the winner's later write to that physical slot. This is exactly
+// what TSan caught in Phase 6's sustained-load test under real,
+// high-volume drop-oldest churn (a scenario Phase 3's own smaller/paced
+// tests didn't happen to trigger): a write in push() (spsc_ring_buffer.hpp,
+// old line 112) racing a read in try_claim_front() (old line 171). See
+// cpp/pipeline/README.md for the full before/after story. Per-slot
+// sequence numbers close this gap structurally: a losing claimant in the
+// new design only ever reads the atomic `sequence` field (always race-free
+// by definition) before deciding to retry — it never touches `cell.data`
+// unless it's the confirmed winner, and by the time it's the winner, the
+// per-cell acquire/release pair has already established the happens-before
+// edge that makes the read or write safe.
 //
-// Now genuinely TSan-clean under real concurrent load.
+// T must be DefaultConstructible (Cell's `data` member) and
+// MoveConstructible/MoveAssignable. Unlike the Phase 3 design, T no longer
+// needs to be CopyConstructible — there is no more copy-before-CAS; the
+// sequence number does that job instead.
 template <typename T>
 class SpscRingBuffer {
 public:
-    // capacity must be a power of two (enables index masking instead of
-    // modulo, and makes the "is full" check exact). Not rounded up
+    // capacity must be a power of two >= 2 (enables index masking instead
+    // of modulo, and makes the "is full" check exact). Not rounded up
     // automatically — an unexpected capacity should be visible at
     // construction, not silently changed.
+    //
+    // capacity == 1 is rejected, not just an unlikely-to-be-useful choice:
+    // at capacity 1, every logical index maps to the same physical cell as
+    // its immediate predecessor, so the "just published, index N" marker a
+    // producer writes (sequence == N + 1) is numerically indistinguishable
+    // from the "vacated, ready for index N + 1" marker the very next
+    // push() checks for (also N + 1, since mask_ == 0 means index N + 1's
+    // check target is itself N + 1). push() would then treat unconsumed
+    // data as already-free and silently overwrite it without ever calling
+    // try_claim_front() or incrementing dropped_count() — breaking the
+    // processed + dropped == pushed accounting invariant every test in
+    // this codebase relies on. Found by manual trace while building a
+    // targeted regression test for Bug 3 (see
+    // cpp/tests/ingestion/two_thread_pipeline_test.cpp's
+    // HighContentionWraparoundRegressionForBug3), not by a failing test —
+    // no existing test exercised push/pop *behavior* at capacity 1, only
+    // that construction succeeded. See cpp/ingestion/README.md.
     explicit SpscRingBuffer(std::size_t capacity)
-        : capacity_(capacity), mask_(capacity - 1), buffer_(std::make_unique<T[]>(capacity)) {
-        if (capacity == 0 || (capacity & (capacity - 1)) != 0) {
-            throw std::invalid_argument("SpscRingBuffer: capacity must be a power of two");
+        : capacity_(capacity), mask_(capacity - 1), cells_(std::make_unique<Cell[]>(capacity < 2 ? 1 : capacity)) {
+        if (capacity < 2 || (capacity & (capacity - 1)) != 0) {
+            throw std::invalid_argument("SpscRingBuffer: capacity must be a power of two >= 2");
+        }
+        for (std::size_t i = 0; i < capacity_; ++i) {
+            cells_[i].sequence.store(i, std::memory_order_relaxed);
         }
     }
 
@@ -76,41 +113,32 @@ public:
     // oldest unconsumed element was discarded to make room (see
     // dropped_count() for a running total).
     bool push(T item) {
-        std::size_t t = tail_.load(std::memory_order_relaxed);
+        std::size_t pos = tail_.load(std::memory_order_relaxed);
         bool dropped = false;
 
-        // The slot we're about to write (t & mask_) was last used for
-        // logical index (t - capacity_); it's only safe to overwrite once
-        // the consumer has moved past that specific index, i.e. once
-        // head_ > t - capacity_ (written as head_ + capacity_ > t to avoid
-        // unsigned underflow when t < capacity_, which is the common case
-        // before the buffer has filled once).
-        //
-        // A single reclaim via try_claim_front() is NOT sufficient here:
-        // try_claim_front() reclaims whatever the front element currently
-        // is, and if the consumer makes concurrent progress between our
-        // read of `t` and the reclaim, that can be a *different* logical
-        // index than (t - capacity_) — leaving our actual target slot
-        // still occupied by an unconsumed element the consumer might be
-        // concurrently reading. (This was a genuine bug caught by TSan
-        // under sustained load, not a theoretical concern — see
-        // cpp/ingestion/README.md.) Looping on a fresh acquire-read of
-        // head_ after every reclaim attempt is what actually guarantees
-        // slot (t & mask_) specifically has been vacated before we touch
-        // it.
-        while (head_.load(std::memory_order_acquire) + capacity_ <= t) {
+        for (;;) {
+            Cell& cell = cells_[pos & mask_];
+            if (cell.sequence.load(std::memory_order_acquire) == pos) {
+                break;  // vacated specifically for this logical index -- safe to write
+            }
+            // Not yet vacated for `pos` specifically: the buffer is full
+            // from this position's perspective. A single reclaim isn't
+            // guaranteed to free *this* slot (the consumer may have made
+            // concurrent progress claiming a different index) -- loop and
+            // re-check with a fresh sequence read after every attempt,
+            // exactly as the Phase 3 design already knew to do for its own
+            // head_-based check.
             T discarded;
             if (try_claim_front(discarded)) {
                 dropped_.fetch_add(1, std::memory_order_relaxed);
                 dropped = true;
             }
-            // If the claim failed, a concurrent pop() claimed that front
-            // element first — which is exactly the progress we needed;
-            // loop and re-check with a fresh head_ read.
         }
 
-        buffer_[t & mask_] = std::move(item);
-        tail_.store(t + 1, std::memory_order_release);
+        Cell& cell = cells_[pos & mask_];
+        cell.data = std::move(item);
+        cell.sequence.store(pos + 1, std::memory_order_release);
+        tail_.store(pos + 1, std::memory_order_relaxed);
         return !dropped;
     }
 
@@ -126,66 +154,62 @@ public:
     // concurrent access; that's fine here since nothing relies on it being
     // exact.
     std::size_t size_approx() const {
-        std::size_t t = tail_.load(std::memory_order_acquire);
-        std::size_t h = head_.load(std::memory_order_acquire);
+        std::size_t t = tail_.load(std::memory_order_relaxed);
+        std::size_t h = head_.load(std::memory_order_relaxed);
         return t - h;
     }
 
     std::uint64_t dropped_count() const { return dropped_.load(std::memory_order_relaxed); }
 
 private:
+    struct Cell {
+        std::atomic<std::size_t> sequence{0};
+        T data{};
+    };
+
     // Shared claim protocol for "take exclusive ownership of the front
     // element and remove it." Used by both pop() (the common case) and
-    // push()'s drop-oldest reclaim (the rare, full-buffer case). Exactly
-    // one caller can ever win the CAS for a given index value, so exactly
-    // one caller ever *commits* that slot's value as its result — but see
-    // the copy-before-CAS comment below for why that alone isn't enough.
+    // push()'s drop-oldest reclaim (the rare, full-buffer case). The
+    // per-cell sequence number is what makes this safe now — see the class
+    // comment for the full story of why the Phase 3 predecessor of this
+    // function (copy-before-CAS, no sequence numbers) wasn't sufficient.
     bool try_claim_front(T& out) {
-        std::size_t h = head_.load(std::memory_order_relaxed);
+        std::size_t pos = head_.load(std::memory_order_relaxed);
         for (;;) {
-            std::size_t t = tail_.load(std::memory_order_acquire);
-            if (h == t) return false;  // empty, nothing to claim
-
-            // Read a COPY before attempting the claim — not a move, and
-            // not after a successful CAS. An earlier version of this
-            // function did `out = std::move(buffer_[h & mask_])` *after*
-            // the CAS succeeded, which TSan caught as a real race under
-            // sustained load: the CAS's release-store only carries
-            // happens-before guarantees for operations sequenced *before*
-            // it in this thread's program order, and that move was
-            // sequenced *after*. A concurrent thread that acquire-loads
-            // head_ (e.g. push()'s drop-oldest reclaim loop) could observe
-            // the slot as vacated and start overwriting it while this
-            // move was still in flight.
-            //
-            // Reading here, before the CAS, fixes the ordering — but it
-            // must be a copy, not a move: two callers can race to read the
-            // same slot speculatively (harmless, concurrent reads), and
-            // exactly one wins the CAS and keeps its copy; but if either
-            // read were a destructive move, the *other* (losing) caller's
-            // read would have been a real write to the same memory,
-            // racing the winner's read. Copying costs one extra
-            // construction on every claim, in exchange for a design that
-            // doesn't need per-slot sequence numbers (Vyukov-style) to be
-            // correct. See cpp/ingestion/README.md.
-            T candidate = buffer_[h & mask_];
-
-            if (head_.compare_exchange_weak(h, h + 1, std::memory_order_acq_rel,
-                                             std::memory_order_relaxed)) {
-                out = std::move(candidate);
-                return true;
+            Cell& cell = cells_[pos & mask_];
+            const std::size_t seq = cell.sequence.load(std::memory_order_acquire);
+            if (seq == pos + 1) {
+                // Producer's publish for this exact logical index is
+                // visible. Attempt to win it.
+                if (head_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
+                    out = std::move(cell.data);
+                    // Frees this physical slot for the *next* wraparound
+                    // (logical index pos + capacity_) -- release so a
+                    // producer's subsequent acquire-load sees both this
+                    // sequence update and the completed read of cell.data
+                    // that happened-before it.
+                    cell.sequence.store(pos + capacity_, std::memory_order_release);
+                    return true;
+                }
+                // Lost the race for this index to a concurrent claimant
+                // (pop() vs. push()'s reclaim). compare_exchange_weak
+                // refreshed `pos` to the current head_ on failure; loop and
+                // re-read *that* (different) cell's sequence. This loser
+                // never touched cell.data -- only the atomic sequence field,
+                // which is race-free by definition.
+            } else if (seq == pos) {
+                return false;  // nothing published for this index yet -- empty
+            } else {
+                // Stale local `pos`: some other claim already moved head_
+                // past it. Reload and retry against the current value.
+                pos = head_.load(std::memory_order_relaxed);
             }
-            // Lost the claim to a concurrent caller (pop() vs. push()'s
-            // reclaim, racing for the same slot). `candidate` is simply
-            // discarded — it was a copy, so nothing was mutated by reading
-            // it. `h` was refreshed to the current head_ value by
-            // compare_exchange_weak itself; loop and retry against it.
         }
     }
 
     const std::size_t capacity_;
     const std::size_t mask_;
-    std::unique_ptr<T[]> buffer_;
+    std::unique_ptr<Cell[]> cells_;
 
     alignas(64) std::atomic<std::size_t> head_{0};  // consumer-owned index (cache-line separated
     alignas(64) std::atomic<std::size_t> tail_{0};  // producer-owned index  from head_ to avoid

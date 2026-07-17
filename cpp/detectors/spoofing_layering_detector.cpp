@@ -14,6 +14,10 @@ SpoofingLayeringDetector::SpoofingLayeringDetector(SpoofingLayeringConfig config
 
 namespace {
 Side opposite_of(Side side) { return side == Side::kBuy ? Side::kSell : Side::kBuy; }
+
+std::string concurrency_key(const std::string& account_id, const std::string& instrument_id, Side side) {
+    return account_id + "|" + instrument_id + "|" + (side == Side::kBuy ? "B" : "S");
+}
 }  // namespace
 
 void SpoofingLayeringDetector::track_new(const OrderBook& book, const Order& order) {
@@ -30,11 +34,26 @@ void SpoofingLayeringDetector::track_new(const OrderBook& book, const Order& ord
     tracked.opposite_best_at_placement = book.best_price(opposite_of(order.side));
 
     tracked_[order.order_id] = tracked;
+    ++concurrent_count_by_key_[concurrency_key(tracked.account_id, tracked.instrument_id, tracked.side)];
+}
+
+std::optional<SpoofingLayeringDetector::TrackedOrder> SpoofingLayeringDetector::erase_tracked(
+    const std::string& order_id) {
+    auto it = tracked_.find(order_id);
+    if (it == tracked_.end()) return std::nullopt;
+    TrackedOrder erased = it->second;
+    tracked_.erase(it);
+    const std::string key = concurrency_key(erased.account_id, erased.instrument_id, erased.side);
+    auto count_it = concurrent_count_by_key_.find(key);
+    if (count_it != concurrent_count_by_key_.end()) {
+        if (--count_it->second <= 0) concurrent_count_by_key_.erase(count_it);
+    }
+    return erased;
 }
 
 void SpoofingLayeringDetector::handle_replace(const OrderBook& book, const Order& order) {
-    tracked_.erase(order.orig_order_id);  // old identity retired without emitting anything (see class comment)
-    track_new(book, order);               // new identity starts a fresh lifecycle
+    erase_tracked(order.orig_order_id);  // old identity retired without emitting anything (see class comment)
+    track_new(book, order);              // new identity starts a fresh lifecycle
 }
 
 void SpoofingLayeringDetector::handle_execution(const Execution& execution) {
@@ -42,27 +61,21 @@ void SpoofingLayeringDetector::handle_execution(const Execution& execution) {
     if (it == tracked_.end()) return;
     it->second.remaining_qty -= execution.qty;
     if (it->second.remaining_qty <= 0) {
-        tracked_.erase(it);  // fully executed: genuine flow, not spoofing -- just stop tracking it
+        erase_tracked(execution.order_id);  // fully executed: genuine flow, not spoofing -- just stop tracking it
     }
 }
 
 int SpoofingLayeringDetector::count_concurrent_same_account_same_side(const std::string& account_id,
                                                                        const std::string& instrument_id,
                                                                        Side side) const {
-    int count = 0;
-    for (const auto& [order_id, tracked] : tracked_) {
-        if (tracked.account_id == account_id && tracked.instrument_id == instrument_id && tracked.side == side) {
-            ++count;
-        }
-    }
-    return count;
+    auto it = concurrent_count_by_key_.find(concurrency_key(account_id, instrument_id, side));
+    return it == concurrent_count_by_key_.end() ? 0 : it->second;
 }
 
 std::vector<Alert> SpoofingLayeringDetector::handle_cancel(const OrderBook& book, const Order& order) {
-    auto it = tracked_.find(order.orig_order_id);
-    if (it == tracked_.end()) return {};  // not an order this detector was tracking -- silently ignore
-    const TrackedOrder tracked = it->second;
-    tracked_.erase(it);  // lifecycle complete either way
+    std::optional<TrackedOrder> maybe_tracked = erase_tracked(order.orig_order_id);
+    if (!maybe_tracked.has_value()) return {};  // not an order this detector was tracking -- silently ignore
+    const TrackedOrder tracked = *maybe_tracked;  // lifecycle complete either way
 
     const int64_t time_in_book_ns = order.timestamp_ns - tracked.placed_ts;
     const double speed_score =

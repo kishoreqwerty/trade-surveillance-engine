@@ -20,6 +20,10 @@ trade-surveillance-engine/
 │   ├── orderbook/                  # Phase 4 — price-time priority book engine
 │   ├── detectors/                  # Phase 5 — WashTrade, SpoofingLayering, MarkingTheClose,
 │   │                                #           FrontRunning, StatisticalBaseline
+│   ├── pipeline/                   # Phase 6 — the single wiring of ingestion/orderbook/detectors
+│   │                                #           together, used by both live mode and (Phase 10)
+│   │                                #           harness/'s replay mode — no separate offline
+│   │                                #           scoring implementation exists or is planned
 │   ├── simulator/                  # Phase 1 — synthetic order/execution generator
 │   ├── db/                         # Phase 8 — libpqxx / TimescaleDB integration
 │   ├── api/                        # Phase 9 — Drogon or Crow REST layer
@@ -46,9 +50,10 @@ trade-surveillance-engine/
 | `ingestion/` | SPSC ring buffer (in-process hot path) + Kafka producer/consumer (durability, deterministic replay) | `fix/` |
 | `orderbook/` | Hand-rolled book, price-time priority, per-instrument state, depth snapshotting | `ingestion/` |
 | `detectors/` | One class per detector, common `IDetector` interface, run inline against live book state | `orderbook/` |
-| `db/` | Alert/order/trade persistence, TimescaleDB hypertables, query layer | `detectors/` |
+| `pipeline/` | **The single reusable code path both live mode and Phase 10's replay mode run through — there is no separate offline scoring script.** `LivePipeline` does per-instrument `OrderBook` routing, runs all registered detectors against each event, and measures book-apply/detector latency separately; `LiveConsumer` owns the ring-buffer pop loop (thread-agnostic — a plain method any caller's thread invokes, not a self-threading class), which is exactly what lets `harness/` drive the identical class from its own replay driver instead of reimplementing detector orchestration; `PipelineEventSink` bridges `fix/`'s `IEventSink` hook into `ingestion/`'s ring buffer + Kafka | `ingestion/`, `orderbook/`, `detectors/`, `fix/` |
+| `db/` | Alert/order/trade persistence, TimescaleDB hypertables, query layer | `pipeline/` |
 | `api/` | REST endpoints over `db/` — alert listing/filtering, book snapshot retrieval | `db/` |
-| `harness/` | Replays labeled synthetic scenarios through the real pipeline via Kafka, computes precision/recall/F1, threshold sweep, difficulty curve | `simulator/`, `ingestion/`, `detectors/` |
+| `harness/` | Replays labeled synthetic scenarios through the real pipeline via Kafka, computes precision/recall/F1, threshold sweep, difficulty curve | `simulator/`, `ingestion/`, `pipeline/` |
 | `ml_service/` | Isolation Forest anomaly scoring, called async/out-of-band from `detectors/` over REST/gRPC | Independent — own data contract only |
 | `dashboard/` | React UI, reads from `api/` only, no direct backend access | `api/` |
 | `calibration/` | Offline scripts pulling WRDS/TAQ stylized facts, outputs parameter values consumed by `simulator/` config — never commits raw data | External (WRDS, not shipped) |
@@ -80,6 +85,17 @@ SPSC ring buffer with a fixed-capacity backing array, plus a Kafka-backed durabl
 ### `OrderBook` (`orderbook/`)
 Exposes `apply(const Order&)`, `apply(const Execution&)`, `snapshot() -> DepthSnapshot`, and read-only depth-at-level queries. Detectors depend only on this interface, never on ingestion internals — keeps detection logic testable in isolation with hand-constructed book states.
 
+### `IEventSink` (`fix/`) and `LivePipeline`/`LiveConsumer` (`pipeline/`)
+```cpp
+class IEventSink {
+public:
+    virtual ~IEventSink() = default;
+    virtual void on_order(const Order& order) = 0;
+    virtual void on_execution(const Execution& execution) = 0;
+};
+```
+`fix/` owns this abstraction (added in Phase 6) rather than depending on `ingestion/` directly — `SurveillanceFixApplication::set_event_sink()` calls it for every parsed message. `pipeline/`'s `PipelineEventSink` is the concrete implementation, bridging the callback into the SPSC ring buffer (and, optionally, Kafka). `LivePipeline::process(event)` then routes each event to its per-instrument `OrderBook`, runs every registered `IDetector` against the result, and measures book-apply/detector latency separately. `LiveConsumer` owns the ring-buffer pop loop that drives it — thread-agnostic (a plain method a caller runs on whatever thread it spawns), so Phase 10's replay harness can reuse the exact same class from its own driver loop, which is what makes "replay mode reuses the exact same detection code path as live mode" (§5) literally true rather than just a design intention.
+
 ### ML microservice contract (`ml_service/`)
 ```
 POST /score
@@ -97,22 +113,31 @@ Every `Alert` written to TimescaleDB carries enough evidence to reconstruct *why
 
 ```
 FIX message arrives
-  → fix/ parses into Order/Execution struct
-  → ingestion/ SPSC ring buffer (hot path) + Kafka (durability, async)
-  → orderbook/ applies the update, produces new book state
+  → fix/ parses into Order/Execution struct, hands it to IEventSink
+  → pipeline/'s PipelineEventSink pushes it onto ingestion/'s SPSC ring
+    buffer (hot path) and, if configured, publishes it to Kafka
+    (durability, async) — both fed at arrival, independently
+  → pipeline/'s LiveConsumer (its own thread) pops the event and calls
+    LivePipeline::process()
+  → orderbook/ applies the update to that instrument's OrderBook, produces
+    new book state (LivePipeline routes by instrument_id)
   → detectors/ each IDetector.evaluate() runs against the updated book
        (StatisticalBaselineDetector runs synchronously;
         ml_service/ call happens async, off this path)
-  → any Alert objects produced flow to db/ for persistence
+  → any Alert objects produced flow to an IAlertSink — db/ (Phase 8) is
+    the real persistence implementation; Phase 6 also has
+    CollectingAlertSink for tests/demonstration
   → api/ serves alerts to dashboard/ on request (pull, not push, for v1)
 ```
+A ring-buffer drop can make a *logically* inconsistent event reach `OrderBook` (e.g. an Execution referencing an order whose New was dropped) — `OrderBook::apply()` throws `std::invalid_argument` for exactly this (Phase 4's documented stance: a genuine invariant violation in a hand-constructed single-threaded sequence). `LivePipeline::process()` catches that specific exception, counts it, and skips detector evaluation for that event rather than crashing the consumer thread — an accepted, already-documented consequence of Phase 3's drop-oldest policy, not a defect.
 
 ## 5. Data flow (evaluation/replay mode — Phase 10-11)
 
 ```
 simulator/ generates labeled scenario (severity parameter set)
   → written to Kafka topic (same topic type as live mode, different partition/tag)
-  → harness/ replays it through the identical fix/ → ingestion/ → orderbook/ → detectors/ path
+  → harness/ replays it through the identical fix/ → ingestion/ → pipeline/ → detectors/ path
+    (harness/ reuses pipeline/'s LiveConsumer/LivePipeline directly, not a separate replay-mode copy)
   → harness/ compares detector output Alerts against ground-truth labels
   → precision/recall/F1, threshold sweep, confusion matrix, difficulty-curve output
 ```
