@@ -98,6 +98,28 @@ FetchContent_MakeAvailable(quickfix)
 # used by cpp/fix's session settings and tests instead of vendoring a copy.
 set(QUICKFIX_FIX42_SPEC "${quickfix_SOURCE_DIR}/spec/FIX42.xml" CACHE INTERNAL "")
 
+# --- librdkafka -------------------------------------------------------------
+# Phase 3's durable/replayable layer behind the SPSC ring buffer (cpp/ingestion/)
+# — see HLD §5: SPSC gives the lock-free hot path, Kafka gives the durable log
+# Phase 10's evaluation harness replays from. Uses the real librdkafka C++
+# wrapper (RdKafka::Producer/KafkaConsumer, src-cpp/rdkafkacpp.h), not a
+# hand-rolled protocol client. All optional backends (SSL, SASL, CURL, ZSTD)
+# auto-detect and gracefully disable if not present on this machine — none
+# are needed for talking to the unauthenticated local Kafka in
+# docker-compose.yml. Static, matching this project's other FetchContent'd
+# dependencies; its own examples/tests are disabled.
+set(RDKAFKA_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(RDKAFKA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(RDKAFKA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+  librdkafka
+  GIT_REPOSITORY https://github.com/confluentinc/librdkafka.git
+  GIT_TAG v2.15.0
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(librdkafka)
+
 # --- Modules (cpp/) -------------------------------------------------------
 add_subdirectory(cpp/simulator)
 add_subdirectory(cpp/fix)
