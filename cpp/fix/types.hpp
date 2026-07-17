@@ -41,11 +41,15 @@ struct Order {
     OrderStatus status{OrderStatus::kNew};
     std::string venue;
 
-    // Only meaningful when status == kCancelled: the order_id of the order
-    // being cancelled. Equal to order_id in the common case where this
-    // layer doesn't track a separate cancel-request ID (mirrors Phase 1's
-    // fix_writer simplification), but kept as its own field so a real
-    // OrigClOrdID received off the wire is preserved exactly, not assumed.
+    // Only meaningful when status == kCancelled or kReplaced: the order_id
+    // of the resting order being cancelled or amended. Mirrors real FIX's
+    // OrigClOrdID(41), which both OrderCancelRequest and
+    // OrderCancelReplaceRequest use to name the order being acted on, while
+    // ClOrdID(11)/order_id is always the *new* id for this request itself
+    // (see message_translator.cpp's OrderCancelRequest handling — a Replace
+    // follows the same convention, even though Phase 2 doesn't build
+    // OrderCancelReplaceRequest translation yet). Equal to order_id in the
+    // common New-order case where there's nothing to reference.
     std::string orig_order_id;
 };
 
