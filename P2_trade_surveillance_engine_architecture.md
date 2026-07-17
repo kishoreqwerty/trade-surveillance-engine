@@ -59,16 +59,20 @@ trade-surveillance-engine/
 
 ### `IDetector` (common interface for all detectors, `detectors/`)
 ```cpp
+using DetectorEvent = std::variant<Order, Execution>;
+
 class IDetector {
 public:
     virtual ~IDetector() = default;
     virtual std::vector<Alert> evaluate(const OrderBook& book,
-                                          const Order& incoming,
+                                          const DetectorEvent& incoming,
                                           const AccountRegistry& accounts) = 0;
     virtual std::string name() const = 0;
 };
 ```
 Every detector — including `StatisticalBaselineDetector` — implements this. This is what lets the evaluation harness (Phase 10) swap/compare detectors uniformly and produce an apples-to-apples precision/recall comparison.
+
+`incoming` takes `Order` *or* `Execution` (revised from an earlier `Order`-only draft during Phase 5 implementation): `WashTradeDetector` and `MarkingTheCloseDetector` are both fundamentally about completed trades, not resting order state, and can't be implemented correctly against Order-only input. Detectors that only need Order data simply never match the Execution arm.
 
 ### `IngestionQueue` (`ingestion/`)
 SPSC ring buffer with a fixed-capacity backing array, plus a Kafka-backed durable layer behind it. Backpressure policy (drop-oldest, block, or grow — pick one in Phase 3 and document the choice) lives here, not scattered across callers.

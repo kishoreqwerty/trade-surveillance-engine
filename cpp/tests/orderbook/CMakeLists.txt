@@ -3,4 +3,4 @@ add_executable(orderbook_tests
     depth_snapshot_test.cpp
 )
 target_link_libraries(orderbook_tests PRIVATE tse_orderbook tse_fix GTest::gtest_main)
-gtest_discover_tests(orderbook_tests PROPERTIES ENVIRONMENT "${TSE_TEST_ENVIRONMENT}")
+gtest_discover_tests(orderbook_tests DISCOVERY_TIMEOUT 60 PROPERTIES ENVIRONMENT "${TSE_TEST_ENVIRONMENT}")
