@@ -1,0 +1,45 @@
+# ThreadSanitizer suppressions — QuickFIX-internal races only.
+#
+# Every entry here was confirmed by frame-by-frame inspection of an actual
+# TSan report from `cpp/tests/fix/fix_tests` (SocketAcceptor/SocketInitiator
+# loopback session tests): the racing access (frame #0 of the report) sits
+# inside QuickFIX's own vendored source (FetchContent'd from
+# github.com/quickfix/quickfix, not code this project owns), in its
+# Acceptor start/stop lifecycle and Mutex/SessionState bookkeeping. None of
+# the 68 project tests exercise a race whose top frame is our own code
+# (fix_application.cpp, message_translator.cpp, types.cpp, or any test
+# file) — see cpp/fix/README.md for the full investigation, the raw stack
+# traces, and why the SIGABRT this used to cause at process exit is also
+# handled (via this file, not by disabling TSan's error signaling).
+#
+# `race_top` (not `race`) is used deliberately: it only matches when the
+# named function is the *topmost* frame of one of the two racing stacks,
+# not merely present anywhere in the call chain. This keeps the suppression
+# scoped to these three specific internal accesses — it will NOT suppress
+# a new, unrelated race that happens to call through
+# FIX::Session::lookupSession or similar on its way to a real bug in our
+# own code.
+#
+# Re-verify these entries (function names/line numbers) if the pinned
+# QuickFIX GIT_TAG in the root CMakeLists.txt is ever bumped — a version
+# change could shift line numbers or refactor these functions entirely.
+
+# Confirmed: build-debug-tsan/_deps/quickfix-src/src/C++/Mutex.h:57, inside
+# FIX::Mutex::lock(). Read of size 4 by the main thread inside lock()
+# itself, racing a write elsewhere in the library's own session bookkeeping.
+race_top:FIX::Mutex::lock*
+
+# Confirmed: build-debug-tsan/_deps/quickfix-src/src/C++/SessionState.h:57,
+# inside FIX::SessionState::enabled(bool). Session enable/disable flag
+# touched without synchronization from more than one thread during
+# Initiator/Acceptor stop().
+race_top:FIX::SessionState::enabled*
+
+# Confirmed: build-debug-tsan/_deps/quickfix-src/src/C++/SocketAcceptor.cpp:117,
+# inside FIX::SocketAcceptor::onStart() — races against the corresponding
+# read in FIX::SocketAcceptor::onStop() (SocketAcceptor.cpp:147) when
+# start() is followed relatively quickly by stop(), exactly the pattern
+# every LiveSessionFixture-based test uses (SetUp brings the session up,
+# TearDown tears it down).
+race_top:FIX::SocketAcceptor::onStart*
+race_top:FIX::SocketAcceptor::onStop*

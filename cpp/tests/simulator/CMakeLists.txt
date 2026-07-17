@@ -11,4 +11,4 @@ add_executable(simulator_tests
     simulator_test.cpp
 )
 target_link_libraries(simulator_tests PRIVATE tse_simulator GTest::gtest_main)
-gtest_discover_tests(simulator_tests)
+gtest_discover_tests(simulator_tests PROPERTIES ENVIRONMENT "${TSE_TEST_ENVIRONMENT}")

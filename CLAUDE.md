@@ -38,7 +38,7 @@ docker compose up          # brings up TimescaleDB + Kafka locally
 - Work through the build guide **in order**, one phase at a time. Do not implement later-phase functionality early.
 - Correctness before concurrency: `ingestion/`, `orderbook/`, and `detectors/` must each be proven correct in isolation (single-threaded / static-data tests) before Phase 6 wires them into the live, concurrent pipeline.
 - The order book (Phase 4) and the spoofing/layering detector (Phase 5) are the highest-scrutiny pieces of this project. Do not under-test them relative to other modules.
-- Any concurrency code (the SPSC ring buffer, the live pipeline integration) must pass under ThreadSanitizer specifically before being considered done.
+- Any concurrency code (the SPSC ring buffer, the live pipeline integration) must pass under ThreadSanitizer specifically before being considered done. Note: `cpp/fix/`'s TSan runs are already clean for this project's own code — three confirmed QuickFIX-internal races (not ours) are suppressed via `/tsan_suppressions.txt`, scoped precisely (`race_top`, exact function names, not a blanket library suppression). See `cpp/fix/README.md` before treating any *new* TSan report under `cpp/fix/` as expected — verify it isn't a fourth genuine third-party race before adding to the suppression list, and never widen a suppression's scope to make a real finding disappear.
 - The ML microservice (`ml_service/`) must never sit on the synchronous hot path. If a change makes the C++ pipeline block on an HTTP call to `ml_service/`, that's a bug, not a valid implementation, even temporarily for testing.
 
 ## Data & compliance rules — non-negotiable
