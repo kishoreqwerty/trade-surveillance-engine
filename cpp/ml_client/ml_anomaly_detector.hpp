@@ -49,7 +49,7 @@ private:
         int64_t cancel_count{0};
     };
 
-    void handle_order(const tse::fix::Order& order);
+    void handle_order(const tse::fix::Order& order, int64_t book_snapshot_sequence);
 
     MlScoringWorker* worker_;
     MlAnomalyDetectorConfig config_;

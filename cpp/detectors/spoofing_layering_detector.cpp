@@ -119,6 +119,7 @@ std::vector<Alert> SpoofingLayeringDetector::handle_cancel(const OrderBook& book
                       " opposite_price_moved_favorably=" + (moved_favorably ? std::string("true") : "false") +
                       " concurrent_same_side_orders=" + std::to_string(concurrent) +
                       " time_in_book_ns=" + std::to_string(time_in_book_ns);
+    alert.book_snapshot_sequence = book.sequence();
     return {alert};
 }
 

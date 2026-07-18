@@ -4,8 +4,8 @@ namespace tse::detectors {
 
 using tse::fix::Execution;
 
-std::vector<Alert> WashTradeDetector::evaluate(const tse::orderbook::OrderBook& /*book*/,
-                                                const DetectorEvent& incoming, const AccountRegistry& accounts) {
+std::vector<Alert> WashTradeDetector::evaluate(const tse::orderbook::OrderBook& book, const DetectorEvent& incoming,
+                                                const AccountRegistry& accounts) {
     const Execution* execution = std::get_if<Execution>(&incoming);
     if (execution == nullptr) return {};
     if (execution->counterparty_account_id.empty()) return {};  // nothing to compare against
@@ -22,6 +22,7 @@ std::vector<Alert> WashTradeDetector::evaluate(const tse::orderbook::OrderBook& 
     alert.evidence = "Execution " + execution->trade_id + " matched account " + execution->account_id +
                       " against related counterparty " + execution->counterparty_account_id +
                       " (same beneficial owner, explicit link, or self-trade)";
+    alert.book_snapshot_sequence = book.sequence();
     return {alert};
 }
 

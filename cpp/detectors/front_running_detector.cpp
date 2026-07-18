@@ -16,7 +16,8 @@ std::string key_for(const std::string& instrument_id, Side side) {
 }
 }  // namespace
 
-std::vector<Alert> FrontRunningDetector::handle_new(const Order& order, const AccountRegistry& accounts) {
+std::vector<Alert> FrontRunningDetector::handle_new(const Order& order, const AccountRegistry& accounts,
+                                                     int64_t book_snapshot_sequence) {
     const std::string key = key_for(order.instrument_id, order.side);
     std::vector<RecentOrder>& recent = recent_by_key_[key];
 
@@ -48,6 +49,7 @@ std::vector<Alert> FrontRunningDetector::handle_new(const Order& order, const Ac
                               std::to_string(order.timestamp_ns - leader.timestamp_ns) +
                               "ns ahead of a large same-side order " + order.order_id + " (qty=" +
                               std::to_string(order.qty) + ") from account " + order.account_id;
+            alert.book_snapshot_sequence = book_snapshot_sequence;
             alerts.push_back(std::move(alert));
         }
     }
@@ -56,11 +58,11 @@ std::vector<Alert> FrontRunningDetector::handle_new(const Order& order, const Ac
     return alerts;
 }
 
-std::vector<Alert> FrontRunningDetector::evaluate(const tse::orderbook::OrderBook& /*book*/,
+std::vector<Alert> FrontRunningDetector::evaluate(const tse::orderbook::OrderBook& book,
                                                    const DetectorEvent& incoming, const AccountRegistry& accounts) {
     const Order* order = std::get_if<Order>(&incoming);
     if (order == nullptr || order->status != OrderStatus::kNew) return {};
-    return handle_new(*order, accounts);
+    return handle_new(*order, accounts, book.sequence());
 }
 
 }  // namespace tse::detectors

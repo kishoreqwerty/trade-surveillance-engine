@@ -9,10 +9,8 @@ namespace tse::detectors {
 
 // What a detector emits when it fires. Mirrors the architecture doc's
 // "Alert evidence contract" (detector name, order/trade IDs involved, a
-// book depth snapshot reference — carried here as the window/account/order
-// identifiers a Phase 8 persistence layer or Phase 9 dashboard would need
-// to reconstruct *why* this fired without re-running the pipeline) and the
-// HLD's Alert entity (alert_id, detector_type, score/severity, account_id(s),
+// book depth snapshot reference, and the time window) and the HLD's Alert
+// entity (alert_id, detector_type, score/severity, account_id(s),
 // instrument_id, evidence, status, ground_truth_label).
 //
 // Deliberately omits alert_id (assigned at persistence time — Phase 8's
@@ -49,6 +47,29 @@ struct Alert {
     // report -- unset, not a sentinel string, is what "not applicable" looks
     // like here.
     std::optional<std::string> model_version;
+
+    // OrderBook::sequence() at the moment this Alert was constructed -- the
+    // architecture doc's "book depth snapshot reference." Currently just a
+    // stored reference: nothing in this codebase reads it back to
+    // reconstruct a DepthSnapshot yet, and no phase currently commits to
+    // building that (cpp/harness/, the natural home for it, is still an
+    // unbuilt Phase 10 scaffold whose documented scope is precision/recall/
+    // F1/threshold-sweep, not sequence-indexed book reconstruction). The
+    // event-sourced, deterministically-replayable design (ingestion/'s
+    // durable Kafka log, pipeline/'s single reusable live/replay code path)
+    // means reconstruction is buildable later without a schema change --
+    // replaying this instrument's event stream up to this sequence number
+    // would reproduce the exact book state a detector was looking at -- but
+    // that capability doesn't exist today, only the reference value does.
+    //
+    // Populated by every firing detector, including MlAnomalyDetector
+    // (whose evaluate() captures book.sequence() at submission time and
+    // threads it through ScoringRequest, since the OrderBook instance
+    // itself isn't available on MlScoringWorker's later, separate thread —
+    // see ml_anomaly_detector.hpp). std::optional rather than a plain
+    // int64_t only because a hand-constructed Alert in a test has no
+    // natural default sequence value to assume.
+    std::optional<int64_t> book_snapshot_sequence;
 };
 
 }  // namespace tse::detectors

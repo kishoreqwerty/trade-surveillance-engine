@@ -35,6 +35,7 @@ void MlScoringWorker::process_one(const ScoringRequest& request) {
     alert.evidence = "Isolation Forest anomaly_score=" + std::to_string(result->anomaly_score) +
                       " model_version=" + result->model_version;
     alert.model_version = result->model_version;
+    alert.book_snapshot_sequence = request.book_snapshot_sequence;
     if (alert_sink_ != nullptr) {
         alert_sink_->on_alert(alert);
     }

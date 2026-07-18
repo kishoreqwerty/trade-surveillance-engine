@@ -22,7 +22,7 @@ double StatisticalBaselineDetector::sample_variance(const RunningStats& stats) {
     return stats.count > 1 ? stats.m2 / static_cast<double>(stats.count - 1) : 0.0;
 }
 
-std::vector<Alert> StatisticalBaselineDetector::evaluate(const tse::orderbook::OrderBook& /*book*/,
+std::vector<Alert> StatisticalBaselineDetector::evaluate(const tse::orderbook::OrderBook& book,
                                                           const DetectorEvent& incoming,
                                                           const AccountRegistry& /*accounts*/) {
     const Order* order = std::get_if<Order>(&incoming);
@@ -48,6 +48,7 @@ std::vector<Alert> StatisticalBaselineDetector::evaluate(const tse::orderbook::O
                 alert.evidence = "order qty=" + std::to_string(order->qty) + " z=" + std::to_string(z) +
                                   " against running mean=" + std::to_string(stats.mean) +
                                   " stddev=" + std::to_string(stddev) + " (n=" + std::to_string(stats.count) + ")";
+                alert.book_snapshot_sequence = book.sequence();
                 alerts.push_back(std::move(alert));
             }
         }

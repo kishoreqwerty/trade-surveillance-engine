@@ -10,7 +10,7 @@ using tse::fix::OrderStatus;
 MlAnomalyDetector::MlAnomalyDetector(MlScoringWorker* worker, MlAnomalyDetectorConfig config)
     : worker_(worker), config_(config) {}
 
-void MlAnomalyDetector::handle_order(const Order& order) {
+void MlAnomalyDetector::handle_order(const Order& order, int64_t book_snapshot_sequence) {
     const std::string key = order.account_id + "|" + order.instrument_id;
     WindowStats& stats = stats_by_key_[key];
 
@@ -41,6 +41,7 @@ void MlAnomalyDetector::handle_order(const Order& order) {
     request.account_id = order.account_id;
     request.instrument_id = order.instrument_id;
     request.timestamp_ns = order.timestamp_ns;
+    request.book_snapshot_sequence = book_snapshot_sequence;
     request.window_features = {
         {"order_count", static_cast<double>(stats.order_count)},
         {"total_qty", static_cast<double>(stats.total_qty)},
@@ -52,11 +53,11 @@ void MlAnomalyDetector::handle_order(const Order& order) {
     worker_->submit(std::move(request));  // non-blocking -- see class comment
 }
 
-std::vector<tse::detectors::Alert> MlAnomalyDetector::evaluate(const tse::orderbook::OrderBook& /*book*/,
+std::vector<tse::detectors::Alert> MlAnomalyDetector::evaluate(const tse::orderbook::OrderBook& book,
                                                                 const tse::detectors::DetectorEvent& incoming,
                                                                 const tse::detectors::AccountRegistry& /*accounts*/) {
     if (const auto* order = std::get_if<Order>(&incoming)) {
-        handle_order(*order);
+        handle_order(*order, book.sequence());
     }
     return {};  // always -- see class comment
 }

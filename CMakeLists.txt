@@ -146,6 +146,131 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(httplib)
 
+# --- libpq (built from source) ----------------------------------------------
+# Phase 8's cpp/db/ needs libpqxx, which needs the Postgres C client library
+# (libpq) to link against. Unlike every other third-party dependency in this
+# project, libpq/libpqxx can't both be handled by a plain FetchContent +
+# add_subdirectory: Postgres has no CMake build of its own (autotools/meson
+# only), so there's nothing to add_subdirectory(). Rather than requiring
+# every machine that builds this repo to have a system package manager and a
+# pre-installed PostgreSQL dev package (not something CLAUDE.md's Build
+# section asks for, and not present on the machine this was developed on —
+# no Homebrew, no MacPorts, no Postgres.app, no pg_config), libpq is built
+# from the official Postgres source directly, the same "no system packages"
+# posture as QuickFIX/librdkafka/httplib, just via its own ./configure &&
+# make since that's the only build system it has. This runs once per build
+# tree at configure time (blocking, a few minutes) — the EXISTS check below
+# means every later `cmake` invocation against the same build directory
+# skips straight past it.
+set(TSE_LIBPQ_INSTALL_DIR "${CMAKE_BINARY_DIR}/_deps/libpq-install")
+if(NOT EXISTS "${TSE_LIBPQ_INSTALL_DIR}/lib/libpq.a")
+  set(_tse_pg_src_dir "${CMAKE_BINARY_DIR}/_deps/postgres-src")
+  if(NOT EXISTS "${_tse_pg_src_dir}/configure")
+    message(STATUS "libpq: cloning Postgres REL_16_9 source (client library only, not the server)...")
+    execute_process(
+      COMMAND git clone --branch REL_16_9 --depth 1
+              https://github.com/postgres/postgres.git "${_tse_pg_src_dir}"
+      RESULT_VARIABLE _tse_libpq_rc
+    )
+    if(NOT _tse_libpq_rc EQUAL 0)
+      message(FATAL_ERROR "libpq: git clone of Postgres source failed (exit ${_tse_libpq_rc})")
+    endif()
+  endif()
+
+  message(STATUS "libpq: configuring (client library only, server components disabled where optional)...")
+  execute_process(
+    COMMAND ./configure --without-readline --without-icu --without-zlib
+            --without-lz4 --without-zstd --prefix=${TSE_LIBPQ_INSTALL_DIR}
+    WORKING_DIRECTORY "${_tse_pg_src_dir}"
+    RESULT_VARIABLE _tse_libpq_rc
+  )
+  if(NOT _tse_libpq_rc EQUAL 0)
+    message(FATAL_ERROR "libpq: ./configure failed (exit ${_tse_libpq_rc}) — see output above")
+  endif()
+
+  include(ProcessorCount)
+  ProcessorCount(_tse_nproc)
+  if(_tse_nproc EQUAL 0)
+    set(_tse_nproc 4)
+  endif()
+
+  # libpq-fe.h itself #includes postgres_ext.h/pg_config_ext.h — the
+  # server-independent public headers Postgres ships from src/include, not
+  # from src/interfaces/libpq. `make install` scoped to src/interfaces/libpq
+  # alone only installs libpq's own headers, not those; src/include has its
+  # own install target for exactly this "client apps need a few shared
+  # public headers too" case.
+  message(STATUS "libpq: installing shared public headers (postgres_ext.h etc.)...")
+  execute_process(
+    COMMAND make install
+    WORKING_DIRECTORY "${_tse_pg_src_dir}/src/include"
+    RESULT_VARIABLE _tse_libpq_rc
+  )
+  if(NOT _tse_libpq_rc EQUAL 0)
+    message(FATAL_ERROR "libpq: make install (src/include) failed (exit ${_tse_libpq_rc}) — see output above")
+  endif()
+
+  message(STATUS "libpq: building + installing (src/interfaces/libpq only, not the full server)...")
+  execute_process(
+    COMMAND make -j${_tse_nproc} install
+    WORKING_DIRECTORY "${_tse_pg_src_dir}/src/interfaces/libpq"
+    RESULT_VARIABLE _tse_libpq_rc
+  )
+  if(NOT _tse_libpq_rc EQUAL 0)
+    message(FATAL_ERROR "libpq: make install failed (exit ${_tse_libpq_rc}) — see output above")
+  endif()
+
+  # This project links every third-party dependency statically (QuickFIX,
+  # librdkafka, httplib). `make install` produces both libpq.a and a
+  # libpq.dylib; deleting the dylib forces FindPostgreSQL.cmake (used by
+  # libpqxx below) to resolve to the static archive, so test binaries stay
+  # self-contained instead of picking up an untracked runtime dylib
+  # dependency.
+  file(GLOB _tse_libpq_dylibs "${TSE_LIBPQ_INSTALL_DIR}/lib/libpq*.dylib")
+  if(_tse_libpq_dylibs)
+    file(REMOVE ${_tse_libpq_dylibs})
+  endif()
+
+  # libpq.a is deliberately thin: it expects a static-linking consumer to
+  # also supply libpgcommon.a/libpgport.a (frontend-shared string/auth/port
+  # helper code), the same way its own build's link line does
+  # ("-lpgcommon -lpgport -lm", visible in the compile output above). A
+  # normal system package only ships libpq.so (which embeds the position-
+  # independent _shlib variants of these internally), so this requirement
+  # only surfaces when statically linking, as this project does everywhere
+  # else. `make install` scoped to src/interfaces/libpq doesn't install
+  # these two archives anywhere, so they're copied out of the build tree by
+  # hand -- cpp/db/CMakeLists.txt links them explicitly alongside
+  # PostgreSQL::PostgreSQL.
+  file(COPY "${_tse_pg_src_dir}/src/common/libpgcommon.a" "${_tse_pg_src_dir}/src/port/libpgport.a"
+       DESTINATION "${TSE_LIBPQ_INSTALL_DIR}/lib")
+
+  message(STATUS "libpq: built and installed to ${TSE_LIBPQ_INSTALL_DIR}")
+else()
+  message(STATUS "libpq: already built at ${TSE_LIBPQ_INSTALL_DIR} (delete that directory to force a rebuild)")
+endif()
+
+# CMP0074 NEW (required by libpqxx's own CMakeLists.txt) makes find_package()
+# honor <PackageName>_ROOT — this is what points its find_package(PostgreSQL)
+# at our from-source build instead of searching system paths that don't
+# have one.
+set(PostgreSQL_ROOT "${TSE_LIBPQ_INSTALL_DIR}" CACHE PATH
+    "Root of the from-source libpq build (see CMakeLists.txt libpq section)" FORCE)
+
+# --- libpqxx ----------------------------------------------------------------
+# The C++ binding Phase 8 (cpp/db/) uses to talk to TimescaleDB — a thin,
+# RAII wrapper over libpq (connection/transaction/result types) rather than
+# hand-rolling one over the C API, matching this project's general "use the
+# real library for a real protocol" precedent (QuickFIX for FIX, librdkafka
+# for Kafka, cpp-httplib for HTTP).
+FetchContent_Declare(
+  libpqxx
+  GIT_REPOSITORY https://github.com/jtv/libpqxx.git
+  GIT_TAG 7.10.7
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(libpqxx)
+
 # --- Modules (cpp/) -------------------------------------------------------
 add_subdirectory(cpp/simulator)
 add_subdirectory(cpp/fix)

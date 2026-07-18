@@ -64,7 +64,8 @@ private:
         int64_t timestamp_ns{0};
     };
 
-    std::vector<Alert> handle_new(const tse::fix::Order& order, const AccountRegistry& accounts);
+    std::vector<Alert> handle_new(const tse::fix::Order& order, const AccountRegistry& accounts,
+                                   int64_t book_snapshot_sequence);
 
     FrontRunningConfig config_;
     std::unordered_map<std::string, std::vector<RecentOrder>> recent_by_key_;  // key: instrument_id + "|" + side

@@ -70,9 +70,9 @@ public:
     std::string name() const override { return "MarkingTheCloseDetector"; }
 
 private:
-    std::vector<Alert> handle_execution(const tse::fix::Execution& execution);
+    std::vector<Alert> handle_execution(const tse::fix::Execution& execution, int64_t book_snapshot_sequence);
     std::optional<Alert> check_account(const std::string& instrument_id, const std::string& account_id,
-                                        int64_t window_start_ns, int64_t event_ts);
+                                        int64_t window_start_ns, int64_t event_ts, int64_t book_snapshot_sequence);
 
     MarkingTheCloseConfig config_;
     std::unordered_map<std::string, int64_t> total_window_qty_;    // key: instrument_id

@@ -27,7 +27,11 @@ trade-surveillance-engine/
 │   ├── ml_client/                  # Phase 7 — async HTTP client for ml_service/: bounded queue +
 │   │                                #           worker thread + IDetector shim, all off the hot path
 │   ├── simulator/                  # Phase 1 — synthetic order/execution generator
-│   ├── db/                         # Phase 8 — libpqxx / TimescaleDB integration
+│   ├── db/                         # Phase 8 — libpqxx / TimescaleDB integration: schema
+│   │                                #           (orders/trades/alerts hypertables), AlertStore
+│   │                                #           (insert + the query surface api/ calls),
+│   │                                #           DbAlertSink (the real IAlertSink pipeline/'s
+│   │                                #           own comments have referred to since Phase 6)
 │   ├── api/                        # Phase 9 — Drogon or Crow REST layer
 │   ├── harness/                    # Phase 10-11 — evaluation harness, replay, metrics
 │   └── tests/                      # GoogleTest, mirrors the above module structure
@@ -54,7 +58,7 @@ trade-surveillance-engine/
 | `detectors/` | One class per detector, common `IDetector` interface, run inline against live book state | `orderbook/` |
 | `pipeline/` | **The single reusable code path both live mode and Phase 10's replay mode run through — there is no separate offline scoring script.** `LivePipeline` does per-instrument `OrderBook` routing, runs all registered detectors against each event, and measures book-apply/detector latency separately; `LiveConsumer` owns the ring-buffer pop loop (thread-agnostic — a plain method any caller's thread invokes, not a self-threading class), which is exactly what lets `harness/` drive the identical class from its own replay driver instead of reimplementing detector orchestration; `PipelineEventSink` bridges `fix/`'s `IEventSink` hook into `ingestion/`'s ring buffer + Kafka | `ingestion/`, `orderbook/`, `detectors/`, `fix/` |
 | `ml_client/` | `MlAnomalyDetector` — an `IDetector` that only ever accumulates volume/frequency window features and issues a non-blocking `submit()`, never returns anything but an empty vector; `MlScoringWorker` — owns the bounded request queue (reuses `ingestion/`'s `SpscRingBuffer`, same drop-oldest policy) and a background thread that does the actual (blocking-with-timeout) HTTP call and forwards any resulting Alert straight to `IAlertSink`; `MlScoreClient` — the blocking HTTP call itself, timeout-bounded, never called except from that worker thread | `ingestion/`, `orderbook/`, `detectors/`, `fix/`, `pipeline/` (for `IAlertSink` only — `pipeline/` has no dependency back on `ml_client/`) |
-| `db/` | Alert/order/trade persistence, TimescaleDB hypertables, query layer | `pipeline/` |
+| `db/` | `AlertStore` — the only class in this project that speaks SQL: `apply_schema()` (idempotent DDL), `insert_order`/`insert_execution`/`insert_alert`, and the query surface the build guide's Phase 8 "Done when" names explicitly (time-range, filter-by-account, filter-by-detector-type). `DbAlertSink` — the real `IAlertSink` implementation, writing synchronously (no live production entrypoint puts this on the hot consumer thread yet; if one does, `ml_client/`'s async bounded-queue-plus-worker-thread pattern is the template to reuse, not built speculatively here) | `pipeline/` |
 | `api/` | REST endpoints over `db/` — alert listing/filtering, book snapshot retrieval | `db/` |
 | `harness/` | Replays labeled synthetic scenarios through the real pipeline via Kafka, computes precision/recall/F1, threshold sweep, difficulty curve | `simulator/`, `ingestion/`, `pipeline/` |
 | `ml_service/` | FastAPI + scikit-learn Isolation Forest, trained at process startup on synthetic volume/frequency baseline features (never real data — see CLAUDE.md); scores `POST /score` requests from `ml_client/` | Independent — own data contract only, no shared build tooling with the rest of the repo |
@@ -134,7 +138,7 @@ implicit:**
   both cases.
 
 ### Alert evidence contract (`db/`)
-Every `Alert` written to TimescaleDB carries enough evidence to reconstruct *why* it fired without re-running the pipeline: detector name, order/trade IDs involved, a book depth snapshot reference, and the time window.
+Every `Alert` written to TimescaleDB carries enough evidence to reconstruct *why* it fired without re-running the pipeline: detector name, order/trade IDs involved, a book depth snapshot reference, and the time window. Concretely, as of Phase 8: `detectors::Alert` (`cpp/detectors/alert.hpp`) carries `model_version` (populated only by `MlAnomalyDetector`-sourced alerts, `std::nullopt` for every deterministic-rule detector) and `book_snapshot_sequence` (`OrderBook::sequence()` at the moment of firing — every current detector populates it, including the async ML path, which threads it through `ScoringRequest` since `MlScoringWorker`'s background thread has no `OrderBook` reference of its own) as first-class `std::optional` fields, not values embedded only in the free-text `evidence` string. `alerts`' schema stores `account_ids`/`order_ids` as native Postgres arrays (an alert can implicate more than one account or order — e.g. `WashTradeDetector`'s two related accounts) and indexes `account_ids` with a GIN index for the account-filter query.
 
 ---
 
@@ -158,9 +162,11 @@ FIX message arrives
   → any Alert objects produced by the five synchronous detectors flow to
     an IAlertSink immediately; MlAnomalyDetector's own Alert (if any)
     arrives later, from MlScoringWorker's separate background thread,
-    directly to the same IAlertSink — db/ (Phase 8) is the real
-    persistence implementation; Phase 6 also has CollectingAlertSink for
-    tests/demonstration
+    directly to the same IAlertSink — db/'s DbAlertSink (Phase 8) is the
+    real persistence implementation, writing synchronously to TimescaleDB;
+    Phase 6 also has CollectingAlertSink for tests/demonstration. No live
+    production entrypoint wires DbAlertSink onto LiveConsumer's hot thread
+    yet — that's a Phase 9+ decision, not made here (see db/README.md)
   → api/ serves alerts to dashboard/ on request (pull, not push, for v1)
 ```
 A ring-buffer drop can make a *logically* inconsistent event reach `OrderBook` (e.g. an Execution referencing an order whose New was dropped) — `OrderBook::apply()` throws `std::invalid_argument` for exactly this (Phase 4's documented stance: a genuine invariant violation in a hand-constructed single-threaded sequence). `LivePipeline::process()` catches that specific exception, counts it, and skips detector evaluation for that event rather than crashing the consumer thread — an accepted, already-documented consequence of Phase 3's drop-oldest policy, not a defect.
