@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,19 @@ public:
     std::vector<StoredAlert> query_alerts_by_time_range(int64_t window_start_ns, int64_t window_end_ns) const;
     std::vector<StoredAlert> query_alerts_by_account(const std::string& account_id) const;
     std::vector<StoredAlert> query_alerts_by_detector(const std::string& detector_name) const;
+
+    // Phase 9 additions -- api/'s default "list alerts" (no filter given)
+    // and single-alert-lookup endpoints, plus the write side of case
+    // management (api/'s compliance action endpoints).
+    std::vector<StoredAlert> list_recent_alerts(int limit) const;
+    std::optional<StoredAlert> get_alert(int64_t alert_id) const;
+    // Throws pqxx::check_violation if new_status isn't one of schema.sql's
+    // allowed values -- deliberately not re-validated against a second,
+    // C++-side list of the same values, which would just be a second place
+    // for that list to drift out of sync with the schema. Throws
+    // std::runtime_error if alert_id matches no row (checked explicitly:
+    // an UPDATE ... WHERE that matches nothing doesn't error on its own).
+    void update_alert_status(int64_t alert_id, const std::string& new_status);
 
     // Test-only convenience -- never called outside cpp/tests/db/.
     void truncate_all();

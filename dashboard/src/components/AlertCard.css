@@ -1,0 +1,131 @@
+.alert-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  text-align: left;
+  background: var(--page);
+}
+.alert-card-selected {
+  border-color: var(--series-1);
+}
+
+.alert-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.severity-badge {
+  font-size: 12px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.detector-chip {
+  font-size: 11px;
+  color: var(--text-secondary);
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 1px 8px 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.detector-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.status-pill {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  margin-left: auto;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.status-open {
+  color: var(--status-critical);
+}
+.status-under_review {
+  color: var(--status-warning);
+}
+.status-escalated {
+  color: var(--status-serious);
+}
+.status-closed {
+  color: var(--status-good);
+}
+
+.alert-instrument-link {
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline dotted;
+}
+.alert-score {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.alert-evidence {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 6px 0;
+}
+
+.alert-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  font-size: 11px;
+  margin: 6px 0;
+}
+.alert-meta dt {
+  color: var(--text-muted);
+}
+.alert-meta dd {
+  margin: 0;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.alert-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.alert-actions button {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.alert-actions button:hover:not(:disabled) {
+  border-color: var(--series-1);
+}
+.alert-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.alert-action-error {
+  color: var(--status-critical);
+  font-size: 11px;
+  margin: 6px 0 0;
+}

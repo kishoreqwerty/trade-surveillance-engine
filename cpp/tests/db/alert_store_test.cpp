@@ -151,6 +151,8 @@ TEST(AlertStore, InsertAlertAssignsIdAndRoundTripsEveryField) {
     EXPECT_EQ(*round_tripped.model_version, *original.model_version);
     ASSERT_TRUE(round_tripped.book_snapshot_sequence.has_value());
     EXPECT_EQ(*round_tripped.book_snapshot_sequence, *original.book_snapshot_sequence);
+    EXPECT_EQ(found[0].status, "OPEN") << "schema.sql's column default -- no detector or insert_alert() caller "
+                                           "ever sets status explicitly";
 }
 
 // A deterministic-rule detector (e.g. WashTradeDetector) never sets
@@ -172,4 +174,71 @@ TEST(AlertStore, OptionalFieldsRoundTripAsNullNotSentinelValues) {
     ASSERT_EQ(found.size(), 1u);
     EXPECT_FALSE(found[0].alert.model_version.has_value());
     EXPECT_FALSE(found[0].alert.book_snapshot_sequence.has_value());
+}
+
+TEST(AlertStore, GetAlertReturnsTheMatchingAlert) {
+    auto store = connect_or_skip();
+    if (!store) GTEST_SKIP() << "TimescaleDB not reachable at 127.0.0.1:5432 -- run `docker compose up -d timescaledb` first.";
+
+    const int64_t alert_id = store->insert_alert(make_alert());
+
+    std::optional<StoredAlert> found = store->get_alert(alert_id);
+    ASSERT_TRUE(found.has_value());
+    EXPECT_EQ(found->alert_id, alert_id);
+    EXPECT_EQ(found->alert.detector_name, "WashTradeDetector");
+}
+
+TEST(AlertStore, GetAlertWithUnknownIdReturnsNullopt) {
+    auto store = connect_or_skip();
+    if (!store) GTEST_SKIP() << "TimescaleDB not reachable at 127.0.0.1:5432 -- run `docker compose up -d timescaledb` first.";
+
+    EXPECT_FALSE(store->get_alert(999999999).has_value());
+}
+
+TEST(AlertStore, ListRecentAlertsReturnsMostRecentFirstUpToLimit) {
+    auto store = connect_or_skip();
+    if (!store) GTEST_SKIP() << "TimescaleDB not reachable at 127.0.0.1:5432 -- run `docker compose up -d timescaledb` first.";
+
+    for (int i = 0; i < 5; ++i) {
+        Alert alert = make_alert();
+        alert.window_start_ns = 1'000'000'000LL * (i + 1);
+        store->insert_alert(alert);
+    }
+
+    std::vector<StoredAlert> recent = store->list_recent_alerts(3);
+    ASSERT_EQ(recent.size(), 3u);
+    // Most recent (largest window_start_ns) first.
+    EXPECT_EQ(recent[0].alert.window_start_ns, 5'000'000'000LL);
+    EXPECT_EQ(recent[1].alert.window_start_ns, 4'000'000'000LL);
+    EXPECT_EQ(recent[2].alert.window_start_ns, 3'000'000'000LL);
+}
+
+TEST(AlertStore, UpdateAlertStatusChangesStatusAndOnlyThatAlert) {
+    auto store = connect_or_skip();
+    if (!store) GTEST_SKIP() << "TimescaleDB not reachable at 127.0.0.1:5432 -- run `docker compose up -d timescaledb` first.";
+
+    const int64_t target_id = store->insert_alert(make_alert());
+    const int64_t other_id = store->insert_alert(make_alert());
+
+    store->update_alert_status(target_id, "UNDER_REVIEW");
+
+    EXPECT_EQ(store->get_alert(target_id)->status, "UNDER_REVIEW");
+    EXPECT_EQ(store->get_alert(other_id)->status, "OPEN") << "updating one alert must not affect another";
+}
+
+TEST(AlertStore, UpdateAlertStatusWithInvalidValueThrows) {
+    auto store = connect_or_skip();
+    if (!store) GTEST_SKIP() << "TimescaleDB not reachable at 127.0.0.1:5432 -- run `docker compose up -d timescaledb` first.";
+
+    const int64_t alert_id = store->insert_alert(make_alert());
+    EXPECT_THROW(store->update_alert_status(alert_id, "NOT_A_REAL_STATUS"), std::exception);
+    // The rejected update must not have partially applied.
+    EXPECT_EQ(store->get_alert(alert_id)->status, "OPEN");
+}
+
+TEST(AlertStore, UpdateAlertStatusWithUnknownIdThrows) {
+    auto store = connect_or_skip();
+    if (!store) GTEST_SKIP() << "TimescaleDB not reachable at 127.0.0.1:5432 -- run `docker compose up -d timescaledb` first.";
+
+    EXPECT_THROW(store->update_alert_status(999999999, "CLOSED"), std::runtime_error);
 }

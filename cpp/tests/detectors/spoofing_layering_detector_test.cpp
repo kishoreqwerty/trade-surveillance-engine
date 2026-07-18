@@ -246,6 +246,46 @@ TEST(SpoofingLayeringDetector, FullyExecutedOrderNeverFiresEvenIfStrayCancelFoll
     EXPECT_TRUE(cancel_alerts.empty());
 }
 
+// Regression test for a real bug found via the Phase 9 live dashboard: a
+// cancel timestamped *before* the New it's cancelling (only reachable if
+// the underlying event stream goes non-monotonic -- a dropped New under
+// cpp/ingestion/'s drop-oldest backpressure policy leaving tracked_'s
+// entry stale, or cpp/api/main.cpp's demo feed restarting its synthetic
+// clock and reusing an order_id across sessions) must never fire an
+// alert. Before the fix, time_in_book_ns went negative and speed_score
+// clamped to 1.0 -- "maximally fast", exactly backwards for what was
+// actually corrupt timing data, not a genuine fast cancel.
+TEST(SpoofingLayeringDetector, CancelTimestampedBeforeItsOwnPlacementNeverFires) {
+    OrderBook book(kInstrument);
+    SpoofingLayeringDetector detector;
+    AccountRegistry accounts;
+
+    apply_and_evaluate(book, detector, make_new("S1", "SPOOFER", Side::kBuy, 99.00, 1000, 5'000'000'000), accounts);
+    auto alerts = apply_and_evaluate(book, detector, make_cancel("C1", "S1", 1'000'000'000), accounts);
+
+    EXPECT_TRUE(alerts.empty());
+}
+
+// The guard's boundary: a cancel timestamped *exactly* at its own
+// placement time (order.timestamp_ns == tracked.placed_ts, zero-duration
+// -- the most extreme genuinely-legitimate case, not an inverted one)
+// must still fire normally, with time_in_book_ns exactly 0 and speed_score
+// correctly clamped to 1.0. The fix is a strict `<` specifically so this
+// boundary isn't swept in alongside genuinely-inverted (`<`) timestamps.
+TEST(SpoofingLayeringDetector, CancelExactlyAtPlacementTimeStillFiresWithZeroDuration) {
+    OrderBook book(kInstrument);
+    SpoofingLayeringDetector detector;
+    AccountRegistry accounts;
+
+    apply_and_evaluate(book, detector, make_new("S1", "SPOOFER", Side::kBuy, 99.00, 1000, 1'000'000'000), accounts);
+    auto alerts = apply_and_evaluate(book, detector, make_cancel("C1", "S1", 1'000'000'000), accounts);
+
+    // depth=1.0; speed = 1 - 0/5e9 = 1.0; move=0 -- primary = (1+1+0)/3 = 0.6667
+    ASSERT_EQ(alerts.size(), 1u);
+    EXPECT_NEAR(alerts[0].score, 0.666666667, 1e-6);
+    EXPECT_NE(alerts[0].evidence.find("time_in_book_ns=0"), std::string::npos);
+}
+
 // T7: a cancel referencing an order this detector never saw a New for --
 // silently ignored, not a crash, not a spurious alert.
 TEST(SpoofingLayeringDetector, CancelOfUntrackedOrderIsIgnored) {

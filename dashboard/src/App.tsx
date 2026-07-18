@@ -1,122 +1,110 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import { useCallback, useEffect, useState } from "react";
+import { fetchAlerts } from "./api";
+import type { Alert } from "./types";
+import AlertQueue from "./components/AlertQueue";
+import LiveTicker from "./components/LiveTicker";
+import OrderBookDepth from "./components/OrderBookDepth";
+import EventTimeline from "./components/EventTimeline";
+import "./App.css";
+
+const POLL_INTERVAL_MS = 3000;
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [detectorFilter, setDetectorFilter] = useState("");
+  const [accountFilter, setAccountFilter] = useState("");
+  const [selectedInstrument, setSelectedInstrument] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const data = await fetchAlerts({
+        detectorName: detectorFilter || undefined,
+        accountId: accountFilter || undefined,
+        limit: 100,
+      });
+      setAlerts(data);
+      setError(null);
+      setLastUpdated(new Date());
+      // Real-data-derived default, not hardcoded: once alerts arrive and
+      // nothing is selected yet, default the order-book panel to the most
+      // recent alert's own instrument.
+      setSelectedInstrument((current) => current || data[0]?.instrument_id || "");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [detectorFilter, accountFilter]);
+
+  useEffect(() => {
+    refresh();
+    const id = setInterval(refresh, POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [refresh]);
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
+    <div id="root">
+      <header className="app-header">
+        <h1>Trade Surveillance Dashboard</h1>
+        <div className="app-header-status">
+          {error ? (
+            <span className="conn-badge conn-bad">API unreachable: {error}</span>
+          ) : (
+            <span className="conn-badge conn-ok">
+              live &middot; updated {lastUpdated ? lastUpdated.toLocaleTimeString() : "–"}
+            </span>
+          )}
         </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
+      </header>
+
+      <main className="app-grid">
+        <section className="panel panel-queue">
+          <div className="panel-header">
+            <h2>Alert Queue</h2>
+            <div className="filters">
+              <input
+                placeholder="filter: detector name"
+                value={detectorFilter}
+                onChange={(e) => setDetectorFilter(e.target.value)}
+              />
+              <input
+                placeholder="filter: account id"
+                value={accountFilter}
+                onChange={(e) => setAccountFilter(e.target.value)}
+              />
+            </div>
+          </div>
+          <AlertQueue
+            alerts={alerts}
+            onStatusChanged={refresh}
+            onSelectInstrument={setSelectedInstrument}
+            selectedInstrument={selectedInstrument}
+          />
+        </section>
+
+        <section className="panel panel-book">
+          <div className="panel-header">
+            <h2>Order Book</h2>
+            <input
+              className="instrument-input"
+              placeholder="instrument id"
+              value={selectedInstrument}
+              onChange={(e) => setSelectedInstrument(e.target.value)}
+            />
+          </div>
+          <LiveTicker instrumentId={selectedInstrument} />
+          <OrderBookDepth instrumentId={selectedInstrument} />
+        </section>
+      </main>
+
+      <section className="panel panel-timeline">
+        <div className="panel-header">
+          <h2>Event Timeline</h2>
         </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
+        <EventTimeline alerts={alerts} />
       </section>
-
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+    </div>
+  );
 }
 
-export default App
+export default App;

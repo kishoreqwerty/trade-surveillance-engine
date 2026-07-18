@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 
 #include <pqxx/pqxx>
 
@@ -92,6 +93,7 @@ std::vector<StoredAlert> rows_to_stored_alerts(const pqxx::result& rows) {
         if (!row["book_snapshot_sequence"].is_null()) {
             stored.alert.book_snapshot_sequence = row["book_snapshot_sequence"].as<int64_t>();
         }
+        stored.status = row["status"].as<std::string>();
         result.push_back(std::move(stored));
     }
     return result;
@@ -99,7 +101,7 @@ std::vector<StoredAlert> rows_to_stored_alerts(const pqxx::result& rows) {
 
 constexpr const char* kAlertColumns =
     "alert_id, detector_name, score, instrument_id, account_ids, order_ids, "
-    "window_start_ns, window_end_ns, evidence, model_version, book_snapshot_sequence";
+    "window_start_ns, window_end_ns, evidence, model_version, book_snapshot_sequence, status";
 
 }  // namespace
 
@@ -196,6 +198,36 @@ std::vector<StoredAlert> AlertStore::query_alerts_by_detector(const std::string&
         detector_name);
     txn.commit();
     return rows_to_stored_alerts(rows);
+}
+
+std::vector<StoredAlert> AlertStore::list_recent_alerts(int limit) const {
+    pqxx::work txn(*conn_);
+    pqxx::result rows = txn.exec_params(
+        std::string("SELECT ") + kAlertColumns + " FROM alerts ORDER BY window_start_ns DESC LIMIT $1", limit);
+    txn.commit();
+    return rows_to_stored_alerts(rows);
+}
+
+std::optional<StoredAlert> AlertStore::get_alert(int64_t alert_id) const {
+    pqxx::work txn(*conn_);
+    pqxx::result rows = txn.exec_params(
+        std::string("SELECT ") + kAlertColumns + " FROM alerts WHERE alert_id = $1", alert_id);
+    txn.commit();
+    if (rows.empty()) return std::nullopt;
+    std::vector<StoredAlert> stored = rows_to_stored_alerts(rows);
+    return stored.front();
+}
+
+void AlertStore::update_alert_status(int64_t alert_id, const std::string& new_status) {
+    pqxx::work txn(*conn_);
+    // alerts' primary key is (alert_id, event_time), not alert_id alone --
+    // event_time isn't known here, but alert_id is BIGSERIAL-unique across
+    // the whole table regardless, so this WHERE clause is unambiguous.
+    pqxx::result result = txn.exec_params("UPDATE alerts SET status = $1 WHERE alert_id = $2", new_status, alert_id);
+    if (result.affected_rows() == 0) {
+        throw std::runtime_error("update_alert_status: no alert with alert_id=" + std::to_string(alert_id));
+    }
+    txn.commit();
 }
 
 void AlertStore::truncate_all() {

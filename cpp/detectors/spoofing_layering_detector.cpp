@@ -77,6 +77,20 @@ std::vector<Alert> SpoofingLayeringDetector::handle_cancel(const OrderBook& book
     if (!maybe_tracked.has_value()) return {};  // not an order this detector was tracking -- silently ignore
     const TrackedOrder tracked = *maybe_tracked;  // lifecycle complete either way
 
+    // A cancel can never genuinely precede the placement it's cancelling.
+    // If it appears to, tracked_'s entry for this order_id is stale --
+    // most plausibly this order's own New was dropped by
+    // cpp/ingestion/'s drop-oldest backpressure policy (see
+    // cpp/ingestion/README.md), leaving behind a same-order_id entry from
+    // an earlier, unrelated lifecycle (a multi-session replay/demo feed
+    // reusing order_id ranges across restarted synthetic sessions --
+    // cpp/api/main.cpp -- makes this concretely reachable, not just
+    // theoretical). Bail out rather than compute a nonsensical negative
+    // time_in_book_ns and let it silently inflate speed_score (clamped to
+    // 1.0 -- "maximally fast" -- for what was actually corrupt timing
+    // data, not a genuine fast cancel).
+    if (order.timestamp_ns < tracked.placed_ts) return {};
+
     const int64_t time_in_book_ns = order.timestamp_ns - tracked.placed_ts;
     const double speed_score =
         config_.slow_time_in_book_ns > 0

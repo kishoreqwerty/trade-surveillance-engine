@@ -96,6 +96,90 @@ TEST(FrontRunningDetector, LeaderOutsideLookbackWindowDoesNotFire) {
     EXPECT_TRUE(alerts.empty());
 }
 
+// Regression test for a real bug found via the Phase 9 live dashboard: a
+// "leader" entry timestamped *after* the event currently being processed
+// (only reachable if the underlying event stream goes non-monotonic --
+// e.g. a dropped New under cpp/ingestion/'s drop-oldest backpressure
+// policy, or cpp/api/main.cpp's demo feed restarting its synthetic
+// clock) must never be treated as a valid leader. Before the fix, the
+// prune predicate only ever checked "too old" (a positive, large diff),
+// so an entry from the *future* relative to the current order was never
+// pruned and lingered indefinitely -- eventually pairing against some
+// later order and firing an alert whose evidence text contained a
+// nonsensical negative "Xns ahead of" duration.
+TEST(FrontRunningDetector, LeaderTimestampedAfterTheLargeOrderNeverFires) {
+    OrderBook book(kInstrument);
+    FrontRunningDetector detector;
+    AccountRegistry accounts = related_registry();
+
+    // "Leader" arrives with a LATER timestamp than the large order
+    // processed right after it -- impossible for a genuine leader.
+    detector.evaluate(book, DetectorEvent{make_new("L1", "LEADER", Side::kBuy, 150, 5'000'000'000)}, accounts);
+    auto alerts = detector.evaluate(
+        book, DetectorEvent{make_new("C1", "CLIENT", Side::kBuy, 1000, 1'000'000'000)}, accounts);
+
+    EXPECT_TRUE(alerts.empty());
+}
+
+// The non-monotonic entry must actually be pruned, not merely skipped for
+// one comparison -- a later, genuinely-ordered leader/large pair must
+// still fire normally once it is gone, proving the fix doesn't just
+// suppress the symptom for a single event.
+TEST(FrontRunningDetector, SelfHealsAfterNonMonotonicEntryIsPruned) {
+    OrderBook book(kInstrument);
+    FrontRunningDetector detector;
+    AccountRegistry accounts = related_registry();
+
+    detector.evaluate(book, DetectorEvent{make_new("L1", "LEADER", Side::kBuy, 150, 5'000'000'000)}, accounts);
+    // Fails to pair with L1 (non-monotonic) *and* prunes L1 as a side
+    // effect of processing this order.
+    detector.evaluate(book, DetectorEvent{make_new("C1", "CLIENT", Side::kBuy, 1000, 1'000'000'000)}, accounts);
+
+    detector.evaluate(book, DetectorEvent{make_new("L2", "LEADER", Side::kBuy, 150, 1'100'000'000)}, accounts);
+    auto alerts = detector.evaluate(
+        book, DetectorEvent{make_new("C2", "CLIENT", Side::kBuy, 1000, 1'500'000'000)}, accounts);
+
+    ASSERT_EQ(alerts.size(), 1u);
+    EXPECT_EQ(alerts[0].order_ids[0], "L2") << "a genuinely-ordered leader must still fire once the "
+                                                "non-monotonic entry is actually gone, not just skipped";
+}
+
+// The leader and the large order it precedes come from two *different*
+// accounts -- plausibly different systems with independently-clocked
+// infrastructure, unlike SpoofingLayeringDetector's own New/Cancel pair
+// (same order_id, same sender, same clock). A leader that's only
+// slightly "future"-dated relative to the current order -- small enough
+// to plausibly be ordinary cross-account clock skew, not corrupt or
+// unrelated data -- must not be permanently discarded just because it
+// doesn't pair with *this* particular large order: it must still be
+// available to correctly pair with a later large order once real
+// elapsed time removes the ambiguity. Permanently pruning it on the
+// first skewed comparison (rather than just skipping that one
+// comparison) would risk silently suppressing a genuine front-running
+// detection.
+TEST(FrontRunningDetector, SlightlyFutureLeaderIsNotPermanentlyDiscarded) {
+    OrderBook book(kInstrument);
+    FrontRunningDetector detector;
+    AccountRegistry accounts = related_registry();
+
+    // L1 is "future" by 100ms relative to C1 below -- well within the 2s
+    // default lookback window, small enough to be ordinary clock skew,
+    // unlike LeaderTimestampedAfterTheLargeOrderNeverFires's 4s gap.
+    detector.evaluate(book, DetectorEvent{make_new("L1", "LEADER", Side::kBuy, 150, 1'100'000'000)}, accounts);
+    auto first_alerts = detector.evaluate(
+        book, DetectorEvent{make_new("C1", "CLIENT", Side::kBuy, 1000, 1'000'000'000)}, accounts);
+    EXPECT_TRUE(first_alerts.empty()) << "must not fire against an apparently-inverted pairing";
+
+    // A later large order, genuinely after L1 by both processing order and
+    // timestamp, must still be able to pair with L1 -- proving L1 survived
+    // rather than being discarded by the first (skewed) comparison.
+    auto second_alerts = detector.evaluate(
+        book, DetectorEvent{make_new("C2", "CLIENT", Side::kBuy, 1000, 1'500'000'000)}, accounts);
+    ASSERT_EQ(second_alerts.size(), 1u);
+    EXPECT_EQ(second_alerts[0].order_ids[0], "L1") << "L1 must not have been permanently discarded by the "
+                                                        "first, apparently-inverted comparison against C1";
+}
+
 TEST(FrontRunningDetector, UnrelatedAccountsDoNotFire) {
     OrderBook book(kInstrument);
     FrontRunningDetector detector;

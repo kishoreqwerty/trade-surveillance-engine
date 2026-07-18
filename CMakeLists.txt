@@ -271,6 +271,45 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(libpqxx)
 
+# --- standalone Asio (header-only) ------------------------------------------
+# Crow (below) needs a real Asio to build against. Boost.Asio is the other
+# option Crow supports (CROW_USE_BOOST), but pulling in Boost for one header
+# would be a much heavier dependency than this project takes anywhere else —
+# standalone Asio (the same code, decoupled from Boost, still maintained by
+# the same author) is header-only: no build step, just source fetched and
+# its include/ directory pointed at. FetchContent_Populate (not
+# MakeAvailable) is deliberate: Asio has no CMakeLists.txt of its own to
+# add_subdirectory() into this build — it's pure headers, nothing to compile
+# as its own target.
+FetchContent_Declare(
+  asio
+  GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
+  GIT_TAG asio-1-38-1
+  GIT_SHALLOW TRUE
+)
+FetchContent_GetProperties(asio)
+if(NOT asio_POPULATED)
+  FetchContent_Populate(asio)
+endif()
+set(ASIO_INCLUDE_DIR "${asio_SOURCE_DIR}/asio/include" CACHE PATH "" FORCE)
+
+# --- Crow --------------------------------------------------------------
+# Phase 9's REST layer (cpp/api/). Crow over Drogon (the build guide names
+# both as acceptable): Drogon pulls in its own ORM/WebSocket/coroutine
+# machinery this project doesn't need (db/ already is the persistence
+# layer, and the architecture doc's "pull, not push, for v1" data flow
+# means no WebSocket push is needed either) — Crow's plain HTTP JSON
+# routing is a closer match to this project's existing
+# dependency-minimalism precedent (cpp-httplib chosen for ml_client/ over
+# heavier alternatives for the same reason).
+FetchContent_Declare(
+  crow
+  GIT_REPOSITORY https://github.com/CrowCpp/Crow.git
+  GIT_TAG v1.3.3
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(crow)
+
 # --- Modules (cpp/) -------------------------------------------------------
 add_subdirectory(cpp/simulator)
 add_subdirectory(cpp/fix)
