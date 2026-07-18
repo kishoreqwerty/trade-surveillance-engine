@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,14 @@ struct Alert {
     int64_t window_start_ns{0};
     int64_t window_end_ns{0};
     std::string evidence;  // human-readable explanation of why this fired
+
+    // Populated only by model-backed detectors (currently just
+    // MlAnomalyDetector) so Phase 8's persistence layer can store and query
+    // it directly instead of parsing it back out of `evidence`. Empty for
+    // every deterministic-rule detector, which has no model version to
+    // report -- unset, not a sentinel string, is what "not applicable" looks
+    // like here.
+    std::optional<std::string> model_version;
 };
 
 }  // namespace tse::detectors

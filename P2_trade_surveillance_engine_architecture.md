@@ -24,6 +24,8 @@ trade-surveillance-engine/
 │   │                                #           together, used by both live mode and (Phase 10)
 │   │                                #           harness/'s replay mode — no separate offline
 │   │                                #           scoring implementation exists or is planned
+│   ├── ml_client/                  # Phase 7 — async HTTP client for ml_service/: bounded queue +
+│   │                                #           worker thread + IDetector shim, all off the hot path
 │   ├── simulator/                  # Phase 1 — synthetic order/execution generator
 │   ├── db/                         # Phase 8 — libpqxx / TimescaleDB integration
 │   ├── api/                        # Phase 9 — Drogon or Crow REST layer
@@ -51,10 +53,11 @@ trade-surveillance-engine/
 | `orderbook/` | Hand-rolled book, price-time priority, per-instrument state, depth snapshotting | `ingestion/` |
 | `detectors/` | One class per detector, common `IDetector` interface, run inline against live book state | `orderbook/` |
 | `pipeline/` | **The single reusable code path both live mode and Phase 10's replay mode run through — there is no separate offline scoring script.** `LivePipeline` does per-instrument `OrderBook` routing, runs all registered detectors against each event, and measures book-apply/detector latency separately; `LiveConsumer` owns the ring-buffer pop loop (thread-agnostic — a plain method any caller's thread invokes, not a self-threading class), which is exactly what lets `harness/` drive the identical class from its own replay driver instead of reimplementing detector orchestration; `PipelineEventSink` bridges `fix/`'s `IEventSink` hook into `ingestion/`'s ring buffer + Kafka | `ingestion/`, `orderbook/`, `detectors/`, `fix/` |
+| `ml_client/` | `MlAnomalyDetector` — an `IDetector` that only ever accumulates volume/frequency window features and issues a non-blocking `submit()`, never returns anything but an empty vector; `MlScoringWorker` — owns the bounded request queue (reuses `ingestion/`'s `SpscRingBuffer`, same drop-oldest policy) and a background thread that does the actual (blocking-with-timeout) HTTP call and forwards any resulting Alert straight to `IAlertSink`; `MlScoreClient` — the blocking HTTP call itself, timeout-bounded, never called except from that worker thread | `ingestion/`, `orderbook/`, `detectors/`, `fix/`, `pipeline/` (for `IAlertSink` only — `pipeline/` has no dependency back on `ml_client/`) |
 | `db/` | Alert/order/trade persistence, TimescaleDB hypertables, query layer | `pipeline/` |
 | `api/` | REST endpoints over `db/` — alert listing/filtering, book snapshot retrieval | `db/` |
 | `harness/` | Replays labeled synthetic scenarios through the real pipeline via Kafka, computes precision/recall/F1, threshold sweep, difficulty curve | `simulator/`, `ingestion/`, `pipeline/` |
-| `ml_service/` | Isolation Forest anomaly scoring, called async/out-of-band from `detectors/` over REST/gRPC | Independent — own data contract only |
+| `ml_service/` | FastAPI + scikit-learn Isolation Forest, trained at process startup on synthetic volume/frequency baseline features (never real data — see CLAUDE.md); scores `POST /score` requests from `ml_client/` | Independent — own data contract only, no shared build tooling with the rest of the repo |
 | `dashboard/` | React UI, reads from `api/` only, no direct backend access | `api/` |
 | `calibration/` | Offline scripts pulling WRDS/TAQ stylized facts, outputs parameter values consumed by `simulator/` config — never commits raw data | External (WRDS, not shipped) |
 
@@ -102,7 +105,33 @@ POST /score
 { "account_id": ..., "instrument_id": ..., "window_features": {...} }
 → { "anomaly_score": float, "model_version": string }
 ```
-Called async from `detectors/` — never on the synchronous hot path. Timeout + fallback behavior must be defined in Phase 7, not left implicit.
+Called async — never on the synchronous hot path. The path from `detectors/`
+to this contract runs entirely through `ml_client/`, not `detectors/`
+directly: `MlAnomalyDetector` (an `IDetector`) only ever accumulates
+features and calls a non-blocking `submit()`; `MlScoringWorker`'s own
+background thread is what actually issues this HTTP call, via
+`MlScoreClient`.
+
+**Timeout + fallback behavior, defined explicitly (Phase 7), not left
+implicit:**
+- `MlScoreClient` uses a strict connect + read timeout (200ms default).
+  Any failure — timeout, connection refused, non-200 status, or an
+  unparseable response — returns `std::nullopt`, never throws: "the ML
+  service is unavailable" is an ordinary, expected outcome, not an
+  exceptional one.
+- `MlScoringWorker.submit()` is non-blocking by construction: it pushes
+  onto a bounded `ingestion::SpscRingBuffer`, which reuses the exact same
+  drop-oldest policy Phase 3 built and TSan-verified — a queue-full
+  condition (the worker falling behind, or the service being down) drops
+  the oldest pending request rather than making the hot path wait.
+- Net effect: fail open. A slow or dead ML service produces zero
+  additional alerts and zero hot-path latency impact — never a block,
+  never a crash. Proven, not just asserted, by
+  `cpp/tests/ml_client/graceful_degradation_test.cpp`: a real `ml_service/`
+  subprocess, artificially slowed past its client timeout and then hard-
+  killed, with the hot-path latency budget (the same one Phase 6
+  established for the five synchronous detectors) measured to hold in
+  both cases.
 
 ### Alert evidence contract (`db/`)
 Every `Alert` written to TimescaleDB carries enough evidence to reconstruct *why* it fired without re-running the pipeline: detector name, order/trade IDs involved, a book depth snapshot reference, and the time window.
@@ -122,11 +151,16 @@ FIX message arrives
   → orderbook/ applies the update to that instrument's OrderBook, produces
     new book state (LivePipeline routes by instrument_id)
   → detectors/ each IDetector.evaluate() runs against the updated book
-       (StatisticalBaselineDetector runs synchronously;
-        ml_service/ call happens async, off this path)
-  → any Alert objects produced flow to an IAlertSink — db/ (Phase 8) is
-    the real persistence implementation; Phase 6 also has
-    CollectingAlertSink for tests/demonstration
+       (StatisticalBaselineDetector and the other four run fully
+        synchronously; ml_client/'s MlAnomalyDetector only ever
+        accumulates features and calls MlScoringWorker::submit() —
+        non-blocking — before returning)
+  → any Alert objects produced by the five synchronous detectors flow to
+    an IAlertSink immediately; MlAnomalyDetector's own Alert (if any)
+    arrives later, from MlScoringWorker's separate background thread,
+    directly to the same IAlertSink — db/ (Phase 8) is the real
+    persistence implementation; Phase 6 also has CollectingAlertSink for
+    tests/demonstration
   → api/ serves alerts to dashboard/ on request (pull, not push, for v1)
 ```
 A ring-buffer drop can make a *logically* inconsistent event reach `OrderBook` (e.g. an Execution referencing an order whose New was dropped) — `OrderBook::apply()` throws `std::invalid_argument` for exactly this (Phase 4's documented stance: a genuine invariant violation in a hand-constructed single-threaded sequence). `LivePipeline::process()` catches that specific exception, counts it, and skips detector evaluation for that event rather than crashing the consumer thread — an accepted, already-documented consequence of Phase 3's drop-oldest policy, not a defect.

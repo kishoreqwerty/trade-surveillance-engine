@@ -120,6 +120,32 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(librdkafka)
 
+# --- cpp-httplib --------------------------------------------------------
+# Phase 7's blocking-with-timeout HTTP client (cpp/ml_client/) talks to the
+# Python ML microservice over plain local HTTP — cpp-httplib is a small,
+# widely-used single-header client/server library, adequate for a call
+# this project deliberately keeps off the synchronous hot path (see
+# CLAUDE.md) and out of any latency-critical code. HTTPS/compression
+# support is disabled: nothing here ever needs it (ml_service/ is a local,
+# unauthenticated dev service, matching this project's Kafka/TimescaleDB
+# posture), and disabling it avoids pulling in OpenSSL/zlib/brotli as
+# transitive dependencies for a feature never used.
+set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_REQUIRE_ZLIB OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_REQUIRE_BROTLI OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_BROTLI_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_COMPILE OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+  httplib
+  GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+  GIT_TAG v0.18.3
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(httplib)
+
 # --- Modules (cpp/) -------------------------------------------------------
 add_subdirectory(cpp/simulator)
 add_subdirectory(cpp/fix)
@@ -127,6 +153,7 @@ add_subdirectory(cpp/ingestion)
 add_subdirectory(cpp/orderbook)
 add_subdirectory(cpp/detectors)
 add_subdirectory(cpp/pipeline)
+add_subdirectory(cpp/ml_client)
 add_subdirectory(cpp/db)
 add_subdirectory(cpp/api)
 add_subdirectory(cpp/harness)
