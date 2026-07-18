@@ -36,6 +36,7 @@ std::optional<Alert> MarkingTheCloseDetector::check_account(const std::string& i
     alert.score = std::min(share, 1.0);
     alert.instrument_id = instrument_id;
     alert.account_ids = {account_id};
+    alert.order_ids = trade_ids_by_key_[key];
     alert.window_start_ns = window_start_ns;
     alert.window_end_ns = event_ts;
     alert.evidence = "account closing-window volume=" + std::to_string(account_qty) + " / total=" +
@@ -54,9 +55,12 @@ std::vector<Alert> MarkingTheCloseDetector::handle_execution(const Execution& ex
 
     total_window_qty_[execution.instrument_id] += execution.qty;
     account_window_qty_[key_for(execution.instrument_id, execution.account_id)] += execution.qty;
+    trade_ids_by_key_[key_for(execution.instrument_id, execution.account_id)].push_back(execution.trade_id);
     if (!execution.counterparty_account_id.empty() &&
         execution.counterparty_account_id != execution.account_id) {
         account_window_qty_[key_for(execution.instrument_id, execution.counterparty_account_id)] += execution.qty;
+        trade_ids_by_key_[key_for(execution.instrument_id, execution.counterparty_account_id)].push_back(
+            execution.trade_id);
     }
 
     std::vector<Alert> alerts;

@@ -134,3 +134,34 @@ Scenario 3 specifically kills a process that was already confirmed
 healthy (not "never started") — the failure path exercised is "a running
 dependency died," which is a meaningfully different and more realistic
 condition than "was never reachable to begin with."
+
+## Addendum: TSan latency-budget miscalibration, found and fixed during Phase 10 verification
+
+The TSan numbers above (mean ~413µs, comfortably under the 1ms budget)
+were real when captured, but this exact test was later found to fail
+consistently under TSan on this same machine — not intermittently, and
+not because of unrelated background load. Investigated properly (per
+CLAUDE.md's rule for concurrency code, not attributed to load without
+checking): re-ran `GracefulDegradation.HotPathLatencyStaysWithinBudgetRegardlessOfServiceState`
+5/5 times under TSan in isolation, with Docker, the dashboard dev server,
+and every other non-essential process on the machine stopped first. It
+failed all 5 times, consistently at ~2.2–2.4x the plain 1ms/5ms budget
+(one run's p99 spiked to ~1.3x its own budget) — while the identical test
+continued to pass cleanly under both the plain benchmark build and ASan
+(confirmed the same session, full 267-test suite, both clean). That
+combination — fails only under TSan, fails consistently rather than
+intermittently, passes under every other config — points at TSan's own
+instrumentation overhead (it intercepts every memory access to build its
+happens-before graph) having grown relative to this budget as the pipeline
+gained detectors and code across later phases, not a functional
+regression: every other assertion in the test (the `ml_scored`/
+`ml_failed`/`ml_dropped` counts proving the slow/kill/recovery injection
+is genuinely happening) passed in every run.
+
+Fixed with a TSan-specific budget (`__has_feature(thread_sanitizer)` /
+`__SANITIZE_THREAD__`-gated in `graceful_degradation_test.cpp`): 5ms mean
+/ 15ms p99 under TSan, unchanged 1ms/5ms everywhere else. Chosen with
+margin above the worst observed run, not tuned to just barely pass — it
+would still fail a genuine 10x+ hot-path regression. Verified 5/5 clean
+under TSan after the fix, in the same stopped-load conditions.
+condition than "was never reachable to begin with."

@@ -68,7 +68,7 @@ trade-surveillance-engine/
 | `ml_client/` | `MlAnomalyDetector` — an `IDetector` that only ever accumulates volume/frequency window features and issues a non-blocking `submit()`, never returns anything but an empty vector; `MlScoringWorker` — owns the bounded request queue (reuses `ingestion/`'s `SpscRingBuffer`, same drop-oldest policy) and a background thread that does the actual (blocking-with-timeout) HTTP call and forwards any resulting Alert straight to `IAlertSink`; `MlScoreClient` — the blocking HTTP call itself, timeout-bounded, never called except from that worker thread | `ingestion/`, `orderbook/`, `detectors/`, `fix/`, `pipeline/` (for `IAlertSink` only — `pipeline/` has no dependency back on `ml_client/`) |
 | `db/` | `AlertStore` — the only class in this project that speaks SQL: `apply_schema()` (idempotent DDL), `insert_order`/`insert_execution`/`insert_alert`, the query surface the build guide's Phase 8 "Done when" names explicitly (time-range, filter-by-account, filter-by-detector-type) plus Phase 9's `list_recent_alerts`/`get_alert`/`update_alert_status` (case-management state — `alerts.status`, `OPEN`→`UNDER_REVIEW`/`ESCALATED`→`CLOSED`, enforced by a schema CHECK constraint, never by a detector). `DbAlertSink` — the real `IAlertSink` implementation, writing synchronously (no live production entrypoint puts this on the hot consumer thread yet; if one does, `ml_client/`'s async bounded-queue-plus-worker-thread pattern is the template to reuse, not built speculatively here) | `pipeline/` |
 | `api/` | `AlertStore`-backed REST endpoints (listing/filtering/case-status) plus `LiveBookRegistry` — a thread-safe wrapper `LivePipeline` itself deliberately isn't (see `pipeline/`'s own entry): the same ring-buffer pop-and-process shape as `LiveConsumer`, mutex-shared between the one thread that calls `process()` and any number of HTTP handler threads calling `snapshot()`. `main.cpp` is the live demo server — a real FIX loopback session feeding a real `LivePipeline` + `DbAlertSink`, the actual "Done when" entrypoint Phase 9's dashboard runs against | `db/` |
-| `harness/` | Replays labeled synthetic scenarios through the real pipeline via Kafka, computes precision/recall/F1, threshold sweep, difficulty curve | `simulator/`, `ingestion/`, `pipeline/` |
+| `harness/` | `ground_truth.cpp` indexes Phase 1 labels by order/trade id before stripping (evaluation-only, never on the replay path); `replay_runner.cpp` publishes simulator output as `fix::Order`/`Execution` to a real Kafka topic and replays it deterministically into an unmodified `LiveConsumer`/`LivePipeline`; `evaluation.cpp` scores the resulting Alerts against ground truth per detector's own evidence-id universe (confusion matrix, threshold sweep, severity gradient). `tse_harness_eval` is the "Done when" entrypoint — see `cpp/harness/README.md` for real numbers and honest findings, including two real bugs this phase found and fixed (`MarkingTheCloseDetector` never populated `Alert::order_ids`; `FrontRunningDetector`'s leader/large-order ordering requirement was backwards relative to both the generator and the standard front-running definition) and one Phase 1/Phase 5 calibration mismatch left for Phase 11 rather than patched here (`SpoofingLayeringDetector`'s speed signal vs. the generator's dwell-time formula) | `simulator/`, `ingestion/`, `pipeline/`, `detectors/` |
 | `ml_service/` | FastAPI + scikit-learn Isolation Forest, trained at process startup on synthetic volume/frequency baseline features (never real data — see CLAUDE.md); scores `POST /score` requests from `ml_client/` | Independent — own data contract only, no shared build tooling with the rest of the repo |
 | `dashboard/` | React + TypeScript UI (own Vite project), reads from `api/` only via polling (no direct backend access, no WebSocket push — matches §4's "pull, not push, for v1") | `api/` |
 | `calibration/` | Offline scripts pulling WRDS/TAQ stylized facts, outputs parameter values consumed by `simulator/` config — never commits raw data | External (WRDS, not shipped) |
@@ -244,14 +244,55 @@ A ring-buffer drop can make a *logically* inconsistent event reach `OrderBook` (
 ## 5. Data flow (evaluation/replay mode — Phase 10-11)
 
 ```
-simulator/ generates labeled scenario (severity parameter set)
-  → written to Kafka topic (same topic type as live mode, different partition/tag)
-  → harness/ replays it through the identical fix/ → ingestion/ → pipeline/ → detectors/ path
-    (harness/ reuses pipeline/'s LiveConsumer/LivePipeline directly, not a separate replay-mode copy)
-  → harness/ compares detector output Alerts against ground-truth labels
-  → precision/recall/F1, threshold sweep, confusion matrix, difficulty-curve output
+simulator/ generates a labeled SimulationOutput (severity parameter set)
+  → harness/'s ground_truth.cpp indexes every Order/Execution's
+    GroundTruthLabel by order_id/trade_id BEFORE stripping -- evaluation-
+    only bookkeeping, never touching the replay path below
+  → harness/'s replay_runner.cpp converts to plain fix::Order/Execution
+    (Phase 2's live-mode structs -- no ground_truth_label field exists on
+    them at all) and publishes to a real Kafka topic via ingestion/'s
+    KafkaProducer
+  → ingestion/'s KafkaReplayConsumer seeks to the beginning and reads it
+    back deterministically into a fresh SpscRingBuffer
+  → pipeline/'s LiveConsumer (unmodified -- the same class the live path
+    uses) pops that buffer and drives pipeline/'s LivePipeline (also
+    unmodified), wired with the five Phase 5 rule-based detectors
+    (MlAnomalyDetector excluded -- an out-of-band async HTTP call would
+    reintroduce the nondeterminism KafkaReplayConsumer exists to avoid)
+  → harness/'s evaluation.cpp scores the resulting Alerts against the
+    ground-truth index: each detector's confusion matrix is computed over
+    its own "evidence universe" (the exact id space it can reference --
+    e.g. SpoofingLayeringDetector only ever fires from handle_cancel(), so
+    its universe is Cancel-order ids, not all orders), not a single
+    generic id space shared across detectors
+  → precision/recall/F1, threshold sweep, confusion matrix, and a
+    severity-gradient curve are printed by tse_harness_eval -- see
+    cpp/harness/README.md for the real numbers and, importantly, the
+    honest findings: two real bugs this phase found and fixed
+    (MarkingTheCloseDetector never populated Alert::order_ids; and
+    FrontRunningDetector required its smaller "leader" order to precede
+    the large order it front-runs, which structurally could never match
+    what abuse/front_running.cpp actually generates -- the generator's
+    leader-trades-shortly-AFTER-the-large-order-is-placed shape is the one
+    that matches the standard regulatory front-running definition
+    (advance knowledge of a *pending* order, not of a not-yet-placed one);
+    fixing the detector's direction took its recall on this run from
+    0.000 to 0.578), plus one Phase 1/Phase 5 calibration mismatch left
+    for Phase 11 rather than patched here (SpoofingLayeringDetector's
+    speed_score signal is handicapped below severity ≈0.92 given the
+    generator's current dwell-time formula -- exactly the kind of gap
+    Phase 11's real-data recalibration exists to close).
 ```
-The critical property: replay mode reuses the *exact same* detection code path as live mode.
+Note what does *not* appear above: fix/'s QuickFIX session/wire layer.
+Replay mode reuses the exact same **detection** code path as live mode
+(ingestion/'s ring buffer and Kafka, pipeline/'s LiveConsumer/LivePipeline,
+detectors/ unmodified) — but skips FIX wire encode/decode entirely, going
+straight from simulator output to the same `fix::Order`/`Execution` structs
+FIX parsing would have produced. Phase 2's FIX layer already has its own
+dedicated round-trip tests (`cpp/tests/fix/`); re-deriving detection
+correctness through a wire-protocol hop this phase doesn't need would only
+add nondeterminism risk (network loopback timing) without adding coverage
+of anything this phase is scoped to measure.
 
 ---
 

@@ -117,6 +117,7 @@ void AlertStore::apply_schema() {
     std::stringstream buffer;
     buffer << file.rdbuf();
 
+    std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
     txn.exec(buffer.str());
     txn.commit();
@@ -132,6 +133,7 @@ void AlertStore::apply_schema() {
 // whole statement and fail with "inconsistent types deduced for parameter
 // $n" the moment the two inferred types disagree.
 void AlertStore::insert_order(const tse::fix::Order& order) {
+    std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
     txn.exec_params(
         "INSERT INTO orders (order_id, orig_order_id, account_id, instrument_id, side, price, qty, "
@@ -144,6 +146,7 @@ void AlertStore::insert_order(const tse::fix::Order& order) {
 }
 
 void AlertStore::insert_execution(const tse::fix::Execution& execution) {
+    std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
     txn.exec_params(
         "INSERT INTO trades (trade_id, order_id, account_id, counterparty_account_id, instrument_id, side, "
@@ -156,6 +159,7 @@ void AlertStore::insert_execution(const tse::fix::Execution& execution) {
 }
 
 int64_t AlertStore::insert_alert(const tse::detectors::Alert& alert) {
+    std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
     const std::string account_ids_literal = to_pg_text_array(alert.account_ids);
     const std::string order_ids_literal = to_pg_text_array(alert.order_ids);
@@ -172,6 +176,7 @@ int64_t AlertStore::insert_alert(const tse::detectors::Alert& alert) {
 }
 
 std::vector<StoredAlert> AlertStore::query_alerts_by_time_range(int64_t window_start_ns, int64_t window_end_ns) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
     pqxx::result rows = txn.exec_params(std::string("SELECT ") + kAlertColumns +
                                              " FROM alerts WHERE window_start_ns >= $1 AND window_start_ns <= $2 "
@@ -182,6 +187,7 @@ std::vector<StoredAlert> AlertStore::query_alerts_by_time_range(int64_t window_s
 }
 
 std::vector<StoredAlert> AlertStore::query_alerts_by_account(const std::string& account_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
     pqxx::result rows = txn.exec_params(std::string("SELECT ") + kAlertColumns +
                                              " FROM alerts WHERE account_ids @> ARRAY[$1]::text[] "
@@ -192,6 +198,7 @@ std::vector<StoredAlert> AlertStore::query_alerts_by_account(const std::string& 
 }
 
 std::vector<StoredAlert> AlertStore::query_alerts_by_detector(const std::string& detector_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
     pqxx::result rows = txn.exec_params(
         std::string("SELECT ") + kAlertColumns + " FROM alerts WHERE detector_name = $1 ORDER BY window_start_ns",
@@ -201,6 +208,7 @@ std::vector<StoredAlert> AlertStore::query_alerts_by_detector(const std::string&
 }
 
 std::vector<StoredAlert> AlertStore::list_recent_alerts(int limit) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
     pqxx::result rows = txn.exec_params(
         std::string("SELECT ") + kAlertColumns + " FROM alerts ORDER BY window_start_ns DESC LIMIT $1", limit);
@@ -209,6 +217,7 @@ std::vector<StoredAlert> AlertStore::list_recent_alerts(int limit) const {
 }
 
 std::optional<StoredAlert> AlertStore::get_alert(int64_t alert_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
     pqxx::result rows = txn.exec_params(
         std::string("SELECT ") + kAlertColumns + " FROM alerts WHERE alert_id = $1", alert_id);
@@ -219,6 +228,7 @@ std::optional<StoredAlert> AlertStore::get_alert(int64_t alert_id) const {
 }
 
 void AlertStore::update_alert_status(int64_t alert_id, const std::string& new_status) {
+    std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
     // alerts' primary key is (alert_id, event_time), not alert_id alone --
     // event_time isn't known here, but alert_id is BIGSERIAL-unique across
@@ -231,6 +241,7 @@ void AlertStore::update_alert_status(int64_t alert_id, const std::string& new_st
 }
 
 void AlertStore::truncate_all() {
+    std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
     txn.exec("TRUNCATE orders, trades, alerts");
     txn.commit();

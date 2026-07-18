@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -19,11 +20,27 @@ namespace tse::db {
 // Owns the connection to TimescaleDB and is the only class in this project
 // that speaks SQL. Every write is its own transaction -- Phase 8's job is
 // correctness (schema, queries, real round-trips against a real database),
-// not throughput; if a future live entrypoint wires this onto the hot
+// not throughput; if a future live entrypoint needs to put writes on a hot
 // consumer thread, the async-off-the-hot-path treatment ml_client/ already
 // gives ML scoring (bounded queue + background writer thread) is the
 // obvious template to follow -- deliberately not built here ahead of that
 // actual need. See README.md.
+//
+// Internally synchronized (mutex_ guards every method -- see .cpp): a
+// single pqxx::connection is not safe for concurrent use from multiple
+// threads (libpqxx's own documented constraint -- one connection carries
+// one protocol/transaction state machine), and this store is shared
+// between api/'s multithreaded Crow route handlers (reads) and
+// pipeline/'s single consumer thread via DbAlertSink (writes). Found the
+// hard way: cpp/api/main.cpp's live demo server crashed with
+// `pqxx::usage_error: Started new transaction while transaction was still
+// active` under ordinary concurrent dashboard polling (two panels issuing
+// overlapping requests is enough) -- see README.md for the full story and
+// ConcurrentAlertStoreTest for the regression coverage, run under TSan
+// specifically per CLAUDE.md's rule for concurrency code. A single coarse
+// mutex, not a connection pool, is the proportionate fix here: this class
+// is explicitly not meant to be a high-throughput hot path (see above),
+// and every method already does exactly one round trip.
 class AlertStore {
 public:
     explicit AlertStore(const DbConfig& config = {});
@@ -65,6 +82,10 @@ public:
 
 private:
     std::unique_ptr<pqxx::connection> conn_;
+    // mutable: several callers below (query_*, get_alert, list_recent_alerts)
+    // are logically read-only and declared const, but still need to guard
+    // the one shared connection like every other method.
+    mutable std::mutex mutex_;
 };
 
 }  // namespace tse::db

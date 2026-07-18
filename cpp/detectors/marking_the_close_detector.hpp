@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "i_detector.hpp"
 
@@ -78,6 +79,18 @@ private:
     std::unordered_map<std::string, int64_t> total_window_qty_;    // key: instrument_id
     std::unordered_map<std::string, int64_t> account_window_qty_;  // key: instrument_id + "|" + account_id
     std::unordered_set<std::string> alerted_;                      // same key shape as account_window_qty_
+
+    // Every trade_id that contributed to a (instrument, account)'s window
+    // volume so far, same key shape as account_window_qty_ -- what
+    // check_account() populates Alert::order_ids from. Without this, a
+    // fired Alert carried instrument/account/window/score but no reference
+    // to which actual executions constitute its evidence, violating the
+    // architecture doc's evidence contract (alert.hpp: "order/trade IDs
+    // that constitute the evidence") -- the one detector of the five that
+    // didn't set this field, found by cpp/harness/'s Phase 10 evaluation
+    // (which scores Alerts purely off Alert::order_ids and got a
+    // structural 0 TP for this detector until this was added).
+    std::unordered_map<std::string, std::vector<std::string>> trade_ids_by_key_;
 };
 
 }  // namespace tse::detectors

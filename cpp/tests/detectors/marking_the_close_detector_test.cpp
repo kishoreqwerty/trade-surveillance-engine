@@ -77,6 +77,33 @@ TEST(MarkingTheCloseDetector, DominantPairCrossingThresholdFires) {
     EXPECT_NEAR(alerts[1].score, 600.0 / 1100.0, 1e-9);
 }
 
+// Regression: Alert::order_ids must name every trade_id that contributed to
+// the firing account's window volume, not stay empty -- the architecture
+// doc's evidence contract (alert.hpp: "order/trade IDs that constitute the
+// evidence") applies to this detector exactly as much as the other four,
+// and this field was previously never populated here at all (found by
+// cpp/harness/'s Phase 10 evaluation, which scores Alerts purely off
+// Alert::order_ids and got a structural zero true-positive rate for this
+// detector until this was fixed).
+TEST(MarkingTheCloseDetector, AlertOrderIdsContainsEveryContributingTradeId) {
+    OrderBook book(kInstrument);
+    MarkingTheCloseDetector detector(default_config());
+    AccountRegistry accounts;
+
+    // DOMINANT trades twice before crossing threshold on the second trade --
+    // both trade_ids must show up in the eventual alert's order_ids, not
+    // just the one that happened to tip it over.
+    EXPECT_TRUE(
+        detector.evaluate(book, DetectorEvent{make_exec("DOMINANT", "OTHER1", 300, 91'000'000'000)}, accounts)
+            .empty());
+    auto alerts = detector.evaluate(book, DetectorEvent{make_exec("DOMINANT", "OTHER2", 300, 95'000'000'000)}, accounts);
+
+    ASSERT_EQ(alerts.size(), 2u);  // DOMINANT and OTHER2 both individually clear 300/600 = 0.5
+    const auto& dominant_alert = alerts[0].account_ids == std::vector<std::string>{"DOMINANT"} ? alerts[0] : alerts[1];
+    EXPECT_EQ(dominant_alert.order_ids,
+              (std::vector<std::string>{"EXE-DOMINANT-91000000000", "EXE-DOMINANT-95000000000"}));
+}
+
 // TN: broad participation -- nobody individually dominates the close even
 // once the total-volume floor is cleared.
 TEST(MarkingTheCloseDetector, BroadParticipationBelowConcentrationThresholdDoesNotFire) {

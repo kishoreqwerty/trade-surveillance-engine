@@ -200,3 +200,48 @@ isn't running in this environment" isn't a test failure.
 Confirmed clean across all three sanitizer configs (benchmark/ASan/TSan),
 run sequentially per this project's established QuickFIX-shared-lib-race
 discipline — see the top-level session report for the actual numbers.
+
+## Addendum: a real transaction-concurrency crash, found and fixed during Phase 10 verification
+
+`AlertStore` originally wrapped exactly one `pqxx::connection`, with every
+method (`insert_*`, `query_*`, `get_alert`, `list_recent_alerts`,
+`update_alert_status`) opening its own `pqxx::work` transaction on that
+same connection and nothing else. That's fine as long as exactly one
+thread ever calls into it — which was true when this class was written
+(Phase 8 had no live entrypoint yet) but stopped being true the moment
+Phase 9's `api/main.cpp` wired the *same* `AlertStore` instance into both
+`api/`'s `multithreaded()` Crow server (N HTTP handler threads, all
+calling `query_*`/`get_alert`/`update_alert_status` concurrently) and
+`pipeline/`'s single consumer thread via `DbAlertSink` (calling
+`insert_alert`) — nobody built the equivalent of `api/`'s own
+`LiveBookRegistry` (its mutex-wrapping of `LivePipeline` for exactly this
+reason) for `AlertStore`, and no existing test issued genuinely concurrent
+requests, so it went uncaught.
+
+Found for real: the live demo server (`tse_api_server`) crashed under
+ordinary dashboard use (two polling panels overlapping is enough) with
+`libc++abi: terminating due to uncaught exception of type
+pqxx::usage_error: Started new transaction while transaction was still
+active` — a real, reproducible process crash, not a theoretical race.
+libpqxx connections are documented as not safe for concurrent use from
+multiple threads (one connection = one protocol/transaction state
+machine), so this was never going to be safe without either serializing
+access or giving each thread its own connection.
+
+Fixed with a single `mutex_` guarding every `AlertStore` method (`mutable`,
+so the `const` query methods can take it too) — the same "wrap a class
+that wasn't built for concurrent access with a mutex, don't redesign it
+for real concurrency" choice `LiveBookRegistry` already made for
+`LivePipeline`, and proportionate for the same reason this class's own
+header already states: it's explicitly not meant to be a high-throughput
+hot path, and every method already does exactly one round trip, so a
+coarse lock costs nothing meaningful here.
+
+Verified as a genuine regression, not just a plausible-sounding fix:
+`ConcurrentAlertStoreTest` (8 threads, mixed inserts and queries against
+one shared `AlertStore`) was run against the code *before* the mutex
+(via `git stash`) and failed 5/5 times with the exact same
+`pqxx::usage_error` message the live crash produced, losing most of its
+data in the process (15 of 120 expected rows landed). Restoring the fix
+and re-running: 5/5 clean under benchmark, ASan, and TSan (mandatory here
+since this is now concurrency code — CLAUDE.md's rule).
