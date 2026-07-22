@@ -1,8 +1,6 @@
 # FIX-Native Trade Surveillance Engine (P2) — High-Level Design
 
 **Language:** C++17 (locked, core engine) + Python (isolated ML microservice) + React (dashboard)
-**Target roles:** Goldman Sachs (Software Engineer, New Analyst track), Bloomberg (compliance/surveillance product line), plus dedicated surveillance/RegTech vendors (Nasdaq, NICE Actimize, Solidus Labs, SteelEye, TradingHub, Scila, ACA Group, LSEG, Eventus, b-next, OneMarketData, Trading Technologies) and exchanges/regulators (FINRA, Nasdaq, NYSE/ICE, CME Group). FIX is a broadly recognized keyword across mid/small-tier brokerages, prop shops, custodians, and clearing firms as well — this is the version with the widest opportunity surface.
-**Difficulty:** ~8–8.5/10. This is the full scope — real-time, FIX-native, stateful detection against a live order book, not a batch offline pass.
 **Companion project:** Low-Latency Market Data Feed Handler (C++20/23, pre-trade, lock-free SPSC, sharded by instrument).
 
 ---

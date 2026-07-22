@@ -9,6 +9,7 @@ add_library(tse_simulator STATIC
     abuse/spoofing_layering.cpp
     abuse/marking_the_close.cpp
     abuse/front_running.cpp
+    abuse/sarao_case.cpp
     simulator.cpp
     serialization/fix_writer.cpp
     serialization/json_writer.cpp

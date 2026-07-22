@@ -1,0 +1,9 @@
+# Structural enforcement of CLAUDE.md's rule: never commit raw or derived
+# WRDS/TAQ data to this repo, in any form, at any path. Only the derived
+# summary statistics (output/stylized_facts.json) are ever committed.
+trades.csv
+quotes.csv
+*.csv
+output/*
+!output/.gitkeep
+!output/stylized_facts.json

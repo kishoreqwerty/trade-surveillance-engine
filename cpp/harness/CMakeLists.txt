@@ -23,3 +23,11 @@ target_link_libraries(tse_harness PUBLIC tse_pipeline tse_detectors tse_ingestio
 # numbers a phase report cites.
 add_executable(tse_harness_eval main.cpp)
 target_link_libraries(tse_harness_eval PRIVATE tse_harness)
+
+# Phase 11's CFTC Sarao validation entrypoint -- replays
+# cpp/simulator/abuse/sarao_case.cpp's documented Layering Algorithm
+# pattern through the real live pipeline via the same replay_through_kafka
+# Phase 10 built, and reports honestly whether SpoofingLayeringDetector
+# fires. Not part of any test target -- run manually; see README.md.
+add_executable(tse_sarao_validation sarao_validation_main.cpp)
+target_link_libraries(tse_sarao_validation PRIVATE tse_harness)
