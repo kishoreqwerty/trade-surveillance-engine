@@ -356,12 +356,39 @@ not just a synthetic-data artifact:** any surveillance detector whose
 signals are absolute (a raw price tick, a raw concurrent-order count)
 rather than normalized against prevailing market activity will see its
 false-positive rate rise with volume — a well-known problem in real
-market surveillance, not unique to this project. The two credible fixes
-— normalizing `move_score`/`layering_score` against a rolling measure of
-ambient activity (e.g. recent order/cancel rate for that instrument), or
-widening the reference window so short-term density fluctuations average
-out — are both detector-logic changes, out of Phase 11's scope
-(generator-only) and not implemented here.
+market surveillance, not unique to this project.
+
+**Phase 11.5, part 2 — implemented, not left as a documented limitation.**
+Full mechanism, two real bugs found while verifying (not hypothetical),
+and complete numbers in `PARAMETER_MAPPING.md`'s "Phase 11.5, part 2"
+section — summarized here. Both signals now normalize against a rolling
+ambient baseline (30s = 6×`slow_time_in_book_ns`, pooled across accounts
+per instrument+side) instead of fixed constants: `move_score` discounts
+for how many opposite-touch moves recent conditions would statistically
+produce during a dwell this long; `layering_score` subtracts off what's
+typical for *other* accounts right now before comparing against the
+saturation scale.
+
+Verified, not assumed: (1) a rate sweep showing the FP/precision curve is
+now meaningfully more stable (relative collapse 168.5x → 53.3x from
+rate=3 to 250.35/sec) — a genuine, honest trade-off, not a clean win:
+recall dropped at nearly every rate, net negative on F1 at low density,
+net positive at the high density end the redesign targeted. (2) The real
+Sarao validation case, re-run through the actual pipeline before and
+after — which caught a real regression (20/25 fired, down from 25/25)
+that a stated pre-implementation prediction did *not* anticipate
+correctly: the risk predicted (layering self-contamination hurting
+Sarao specifically) never materialized there — it hit a controlled unit
+test instead, for the same underlying reason, and was already fixed
+before Sarao was even re-run. The regression Sarao *did* expose was
+different: `move_score`'s discount scales with an order's own dwell
+duration, and Sarao's real, historically-documented ~8s dwells took a
+disproportionate hit that shorter test dwells (0.7s–2.5s) never
+surfaced. Fixed by capping the dwell used in that calculation at
+`slow_time_in_book_ns` — past that point `speed_score` is already
+floored at 0, so extrapolating the discount further out was compounding
+the same "not fast" signal twice, not adding information. Sarao:
+**25/25 restored**, max score=0.7611.
 
 **FrontRunningDetector — was 0% recall due to a real detector-logic bug
 (not a generator/detector semantic disagreement as first suspected),

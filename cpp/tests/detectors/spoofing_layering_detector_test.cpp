@@ -117,11 +117,18 @@ TEST(SpoofingLayeringDetector, TextbookSpoofFiresWithHighScore) {
                         accounts);  // best ask now 102.00 -- moved favorably for a resting Buy
 
     auto alerts = apply_and_evaluate(book, detector, make_cancel("C2", "S1", 2'700'000'000), accounts);
-    // time_in_book = 700ms; speed = 1 - 0.7e9/5e9 = 0.86; depth = 1.0; move = 1.0
-    // primary = (1 + 0.86 + 1) / 3 = 0.953333...
+    // time_in_book = 700ms; speed = 1 - 0.7e9/5e9 = 0.86; depth = 1.0.
+    // move (Phase 11.5, density-normalized): A2's placement at t=2.6s is
+    // the only recorded ask-side move in the density window (30s), so
+    // recent_move_rate = 1/30/sec; expected_moves_during_dwell =
+    // (1/30)*0.7 = 7/300; move = 1 - 7/300 = 293/300 (not a flat 1.0 --
+    // the single move that makes moved_favorably=true is itself counted
+    // as one ambient observation, a deliberate, small, accepted effect of
+    // the redesign, not a bug -- see PARAMETER_MAPPING.md).
+    // primary = (1 + 0.86 + 293/300) / 3 = 851/900 = 0.945555...
     ASSERT_EQ(alerts.size(), 1u);
     EXPECT_EQ(alerts[0].detector_name, "SpoofingLayeringDetector");
-    EXPECT_NEAR(alerts[0].score, 0.953333333, 1e-6);
+    EXPECT_NEAR(alerts[0].score, 851.0 / 900.0, 1e-9);
     EXPECT_EQ(alerts[0].instrument_id, kInstrument);
     ASSERT_EQ(alerts[0].account_ids.size(), 1u);
     EXPECT_EQ(alerts[0].account_ids[0], "SPOOFER");
@@ -193,8 +200,14 @@ TEST(SpoofingLayeringDetector, ModerateSignalsAloneWithoutLayeringDoNotFire) {
                         accounts);  // best ask now 103.00 -- moved favorably
 
     auto alerts = apply_and_evaluate(book, detector, make_cancel("C2", "S1", 3'500'000'000), accounts);
-    // time_in_book = 2.5s; speed = 1 - 2.5/5 = 0.5; depth = 0.25; move = 1.0
-    // primary = (0.25 + 0.5 + 1) / 3 = 0.583333...  (no layering) -- below default threshold 0.6
+    // time_in_book = 2.5s; speed = 1 - 2.5/5 = 0.5; depth = 0.25.
+    // move (Phase 11.5, density-normalized): one ask-side move recorded
+    // (A2 at t=2.1s); expected_moves_during_dwell = (1/30)*2.5 = 1/12;
+    // move = 11/12 (not a flat 1.0 -- see
+    // CustomLowerThresholdFiresOnTheOtherwiseSubthresholdCase for the
+    // full derivation of this same setup).
+    // primary = (0.25 + 0.5 + 11/12) / 3 = 5/9 = 0.555555...  (no
+    // layering) -- below default threshold 0.6 either way.
     EXPECT_TRUE(alerts.empty());
 }
 
@@ -221,9 +234,79 @@ TEST(SpoofingLayeringDetector, ModerateSignalsWithConcurrentLayeredOrdersFires) 
     apply_and_evaluate(book, detector, make_new("A2", "ACC-X", Side::kSell, 103.00, 100, 2'100'000'000), accounts);
 
     auto alerts = apply_and_evaluate(book, detector, make_cancel("C2", "S1", 3'500'000'000), accounts);
-    // primary = 0.583333 (as in T5a) + layering_bonus(0.15 * 1.0, 3 concurrent / saturation 3) = 0.733333...
+    // depth = 0.25 (100 / (300 BASE + 100 S1) at S1's own price level); speed = 1 - 2.5e9/5e9 = 0.5.
+    // move (Phase 11.5): one ask-side move recorded (A2 at t=2.1s); dwell
+    // = 2.5s; expected_moves_during_dwell = (1/30)*2.5 = 1/12; move = 11/12.
+    // primary = (0.25 + 0.5 + 11/12) / 3 = 5/9.
+    // layering (Phase 11.5): concurrent=3 (L1/L2/L3, S1 itself just
+    // erased); typical_concurrent excludes SPOOFER's own samples --
+    // averaged only over ACC-BASE's one buy-side sample (count=1) -- so
+    // typical_concurrent=1, not 0. layering = clamp((3-1)/3, 0, 1) = 2/3.
+    // combined = 5/9 + 0.15*(2/3) = 59/90 = 0.655555...
     ASSERT_EQ(alerts.size(), 1u);
-    EXPECT_NEAR(alerts[0].score, 0.733333333, 1e-6);
+    EXPECT_NEAR(alerts[0].score, 59.0 / 90.0, 1e-9);
+}
+
+// Phase 11.5 regression: a real bug found and fixed while implementing
+// the density-normalization above, not a hypothetical. The ambient
+// "typical concurrent count" baseline for layering_score must exclude
+// the tracked order's OWN account -- otherwise an account's own layering
+// pattern is the dominant (here, the ONLY) contributor to what counts as
+// "typical for anyone right now," silently normalizing away the very
+// pattern being evaluated. This scenario has SPOOFER as the only account
+// on this side/instrument at all (no ACC-BASE-style other participant),
+// so without the self-exclusion, typical_concurrent would be computed
+// from SPOOFER's own history (average of 1,2,3 = 2), suppressing
+// layering_score toward 0 for a textbook 3-deep layering pattern.
+TEST(SpoofingLayeringDetector, AmbientLayeringBaselineExcludesTrackedOrdersOwnAccount) {
+    OrderBook book(kInstrument);
+    SpoofingLayeringDetector detector;
+    AccountRegistry accounts;
+
+    apply_and_evaluate(book, detector, make_new("S1", "SPOOFER", Side::kBuy, 99.00, 1000, 1'000'000'000), accounts);
+    apply_and_evaluate(book, detector, make_new("L1", "SPOOFER", Side::kBuy, 98.50, 50, 1'100'000'000), accounts);
+    apply_and_evaluate(book, detector, make_new("L2", "SPOOFER", Side::kBuy, 98.00, 50, 1'200'000'000), accounts);
+
+    auto alerts = apply_and_evaluate(book, detector, make_cancel("C1", "S1", 1'250'000'000), accounts);
+    // depth = 1.0 (sole order at its own price level); speed = 1 - 0.25e9/5e9 = 0.95; move = 0 (no opposite-side
+    // activity at all). concurrent = 2 (L1, L2, after S1 erased). With NO other account ever seen on this
+    // side/instrument, typical_concurrent must be 0 (nothing to average, not SPOOFER's own 1/2/3 history) --
+    // layering = clamp((2-0)/3, 0, 1) = 2/3, matching the ORIGINAL (pre-Phase-11.5) formula exactly in this
+    // specific case, since there's genuinely no ambient data to normalize against.
+    // primary = (1.0 + 0.95 + 0) / 3 = 0.65; combined = 0.65 + 0.15*(2/3) = 0.75.
+    ASSERT_EQ(alerts.size(), 1u);
+    EXPECT_NEAR(alerts[0].score, 0.75, 1e-9);
+}
+
+// Phase 11.5 regression: a real measured regression found via the Sarao
+// validation case, not a hypothetical. Before capping effective_dwell_s
+// at slow_time_in_book_ns, a long-dwelling order (Sarao's real,
+// historically-documented pattern dwells ~8s) took a move_score discount
+// that grew unboundedly with its own dwell length, even though
+// speed_score is already floored at 0 past slow_time_in_book_ns (5s) --
+// double-penalizing the same "not fast" fact through two channels.
+// Mirrors Sarao's exact shape: one ask-side move recorded, then an 8s
+// dwell (longer than slow_time_in_book_ns) before cancelling.
+TEST(SpoofingLayeringDetector, MoveScoreDwellDiscountCappedAtSlowTimeInBookNsNotFullDwell) {
+    OrderBook book(kInstrument);
+    SpoofingLayeringDetector detector;
+    AccountRegistry accounts;
+
+    apply_and_evaluate(book, detector, make_new("A1", "ACC-X", Side::kSell, 101.00, 100, 0), accounts);
+    apply_and_evaluate(book, detector, make_new("S1", "SPOOFER", Side::kBuy, 99.00, 1000, 1'000'000'000),
+                        accounts);  // sole order at 99.00 -> depth=1.0; opposite_best_at_placement=101.00
+    apply_and_evaluate(book, detector, make_cancel("CA1", "A1", 1'500'000'000), accounts);  // clears the way for A2
+    apply_and_evaluate(book, detector, make_new("A2", "ACC-X", Side::kSell, 102.00, 100, 2'000'000'000),
+                        accounts);  // best ask now 102.00 -- the one ask-side move recorded in the density window
+
+    auto alerts = apply_and_evaluate(book, detector, make_cancel("C1", "S1", 9'000'000'000), accounts);
+    // time_in_book = 8s (> slow_time_in_book_ns=5s) -> speed_score=0, same as Sarao.
+    // move: effective_dwell_s = min(8, 5) = 5 (capped); expected_moves_during_dwell = (1/30)*5 = 1/6;
+    // move = 5/6. primary = (1 + 0 + 5/6) / 3 = 11/18 = 0.611... -- clears the default 0.6 threshold.
+    // Uncapped, this would have been effective_dwell_s=8, expected_moves=(1/30)*8=4/15, move=11/15,
+    // primary=(1+0+11/15)/3=26/45=0.5778 -- BELOW threshold. The cap is what makes the difference here.
+    ASSERT_EQ(alerts.size(), 1u);
+    EXPECT_NEAR(alerts[0].score, 11.0 / 18.0, 1e-9);
 }
 
 // T6: a fully-executed order never fires, even if a stray cancel arrives
@@ -368,8 +451,10 @@ TEST(SpoofingLayeringDetector, CustomLowerThresholdFiresOnTheOtherwiseSubthresho
     apply_and_evaluate(book, detector, make_new("A2", "ACC-X", Side::kSell, 103.00, 100, 2'100'000'000), accounts);
 
     auto alerts = apply_and_evaluate(book, detector, make_cancel("C2", "S1", 3'500'000'000), accounts);
-    // Same 0.583333 primary as ModerateSignalsAloneWithoutLayeringDoNotFire, which doesn't fire at the
-    // default 0.6 threshold -- but does at 0.5.
+    // Same setup and same density-normalized move_score derivation as
+    // ModerateSignalsWithConcurrentLayeredOrdersFires above (no L1-L3
+    // here, so no layering contribution): primary = 5/9 = 0.555555...,
+    // below the default 0.6 threshold -- but fires at this test's custom 0.5.
     ASSERT_EQ(alerts.size(), 1u);
-    EXPECT_NEAR(alerts[0].score, 0.583333333, 1e-6);
+    EXPECT_NEAR(alerts[0].score, 5.0 / 9.0, 1e-9);
 }

@@ -617,6 +617,142 @@ concurrent-layering bonus, and two `SpoofingLayering` scenarios can land
 on the same instrument in one simulation, occasionally overlapping in
 timing.
 
+## Phase 11.5, part 2 — density-normalizing SpoofingLayeringDetector
+
+**Scope:** the second Phase 11.5 item — `move_score`/`layering_score` were
+found (Row 6 follow-on, above) to be structurally density-sensitive: both
+compared against fixed absolute constants (`min_opposite_price_move`,
+`layering_saturation_count`) with no notion of what's normal for current
+conditions, so higher ambient order-flow made either signal more likely
+to cross its bar by chance alone, independent of genuine spoofing.
+
+**Design:** a rolling ambient tracker per (instrument, side), pooled
+across accounts, used to normalize both signals against *recent*
+conditions instead of fixed constants:
+
+- `move_score = moved_favorably ? clamp(1 - expected_moves_during_dwell, 0, 1) : 0`,
+  where `expected_moves_during_dwell = recent_move_rate × effective_dwell_s`
+  — a move that ambient churn alone would statistically produce during a
+  dwell this long isn't evidence of this specific order's influence.
+- `layering_score = clamp((concurrent - typical_concurrent) / layering_saturation_count, 0, 1)`
+  — subtracts off "what's typical for anyone right now" before comparing
+  against the saturation scale.
+- `density_window_ns = 30s = 6 × slow_time_in_book_ns` (5s) — not an
+  independent constant. Grounded in the detector's own existing dwell-
+  scale anchor rather than a simulator-side calibrated rate, deliberately:
+  detectors/ must not depend on simulator/, and this detector also has to
+  work against real/replayed data (the Sarao case) where no synthetic
+  calibration applies. 6x gives the window enough dwell-periods' worth of
+  potential events that the rate estimate isn't dominated by single-
+  observation noise, while staying short enough to reflect genuinely
+  recent conditions, not session-wide history.
+
+**Prediction stated before implementing** (per this project's standing
+practice of predicting before verifying, not just checking after the
+fact): `move_score` expected to stay roughly unchanged for the Sarao case
+specifically (a focused historical replay, not dense synthetic ambient
+noise, so `recent_move_rate` should stay low); `layering_score`'s margin
+expected to tighten, possibly meaningfully, from a predicted self-
+referential risk: in a small, focused replay, the "ambient typical"
+baseline could end up dominated by the spoofer's *own* repeated pattern,
+partially cancelling the very signal being measured.
+
+**Two real bugs found while verifying, both fixed, both worth recording
+in full since the actual mechanism didn't match the prediction in either
+case:**
+
+1. **`layering_score` self-contamination — found via a failing existing
+   unit test, not Sarao.** `ModerateSignalsWithConcurrentLayeredOrdersFires`
+   flipped from firing to not firing. Root cause: the ambient
+   `recent_concurrent_samples` pool included the tracked order's *own*
+   account — with only one other account (`ACC-BASE`, one sample) against
+   SPOOFER's four (S1/L1/L2/L3), the "typical" baseline was dominated by
+   SPOOFER's own layering pattern, exactly the self-referential risk
+   predicted above, but manifesting in a basic dense unit test, not the
+   sparse Sarao replay it was predicted for. Fixed by recording each
+   sample's `account_id` and excluding the tracked order's own account
+   when computing its baseline — reusing `AccountRegistry::is_related()`'s
+   spirit (compare against *others*, not yourself) rather than inventing
+   a new mechanism. New regression test:
+   `AmbientLayeringBaselineExcludesTrackedOrdersOwnAccount` (an account
+   whose own layering is the *only* activity on that side/instrument —
+   without the fix, `typical_concurrent` would be computed from its own
+   1/2/3 history instead of the correct 0).
+
+2. **`move_score`'s Sarao regression — found via Sarao itself, exactly
+   the check this work was scoped to include.** Result before this fix:
+   **20/25 fired** (down from 25/25), not the "roughly unchanged"
+   prediction. The self-contamination risk predicted for `layering_score`
+   turned out to be a non-issue for Sarao specifically (`typical_concurrent`
+   was correctly 0 throughout, once fix #1 above was in place — SARAO is
+   the only account in the replay, so self-exclusion reduces to "nothing
+   to average," matching the original formula exactly). The real
+   mechanism was different from what was predicted: `expected_moves_during_dwell`
+   scales with the order's own dwell duration, and Sarao's
+   historically-documented pattern dwells ~8s (already long enough to
+   floor `speed_score` at 0) — even a low ambient rate (1 move recorded
+   in the 30s window) produces a real discount over an 8s dwell
+   (`(1/30)×8 ≈ 0.267`), which the shorter dwells checked during design
+   (0.7s, 2.5s) never surfaced. The 5 missing fires were each wave's
+   `concurrent=0` tier (the last layer to cancel, already known to get
+   zero layering bonus — Rows 7-8): old `combined=0.667` (comfortable
+   margin); new `combined=0.578` (below threshold).
+
+   Fixed by capping `effective_dwell_s` at `slow_time_in_book_ns` (5s) —
+   not a new constant, reusing the existing anchor. Reasoning: past that
+   point `speed_score` is already floored at 0, so extrapolating the
+   move-rate discount further out compounds the same "not fast" signal a
+   second time rather than adding new information. Verified against a
+   hand calculation *before* touching code: capped, the `concurrent=0`
+   tier recomputes to `combined=11/18≈0.611` — clears 0.6 again. New
+   regression test:
+   `MoveScoreDwellDiscountCappedAtSlowTimeInBookNsNotFullDwell`, built to
+   mirror Sarao's exact shape (one recorded move, 8s dwell), asserting
+   the capped value and documenting the uncapped value it would have
+   produced instead (0.578, below threshold) directly in the test
+   comment. All existing unit tests' dwells were already under 5s, so
+   none needed adjustment from this specific fix (confirmed, not
+   assumed) — only the two failing tests above needed their exact
+   expected scores recomputed for the density-normalization itself.
+
+**Post-mortem on the prediction:** partially right, partially wrong, in
+informative ways. The *direction* was right for both signals conceptually
+(density normalization does something), but the *specific* risk named
+(layering self-contamination hurting Sarao) never materialized there —
+it hit a controlled unit test instead, for the same underlying reason
+(pooled ambient samples with too little other data). The risk that did
+hit Sarao (move_score's dwell-duration scaling) wasn't the one predicted
+at all. Recorded here deliberately, not just the corrected final state,
+because the *miss* is as informative as the catch: predicting from "is
+the dataset sparse" reasoning alone, without also deriving the exact
+formula's behavior at the dwell durations actually in play, missed the
+real mechanism.
+
+**Final verified numbers** (main eval config, full rate sweep, before →
+after this section's two fixes; `TP`/`FP` at threshold 0.5):
+
+| rate/sec | 3 | 5 | 7 | 9 | 12 | 16 | 20 | 25 | 75 | 150 | 250.35 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| P before | 0.786 | 0.696 | 0.620 | 0.533 | 0.375 | 0.236 | 0.206 | 0.078 | 0.044 | 0.008 | 0.005 |
+| P after | 0.833 | 0.739 | 0.760 | 0.520 | 0.348 | 0.208 | 0.154 | 0.118 | 0.026 | 0.020 | 0.016 |
+| FP before | 9 | 14 | 19 | 21 | 30 | 42 | 50 | 71 | 194 | 485 | 854 |
+| FP after | 3 | 6 | 6 | 12 | 15 | 19 | 22 | 30 | 75 | 150 | 252 |
+
+Relative precision collapse (rate=3 → rate=250.35): **168.5x before →
+53.3x after** — a real, meaningful stability improvement (~3.2x), not a
+complete fix. Honest trade-off, not a clean win: recall dropped at nearly
+every rate (e.g. TP 33→15 at rate=3) — the density normalization trades
+some sensitivity for stability, most clearly beneficial at the high-
+density end where the original problem was worst (F1 at 250.35/sec:
+0.009→0.024) and net negative at the low end (F1 at rate=3: 0.564→0.323).
+Reported in full, not cherry-picked, per CLAUDE.md's Phase 10/11
+reporting standard.
+
+**Sarao: 25/25 fired, max score=0.7611** (was 25/25 before this
+detector's redesign at all, dipped to 20/25 mid-investigation, restored
+by the dwell cap) — confirmed via the same real-pipeline replay this
+project has used throughout, not assumed safe from the unit tests alone.
+
 ## Deferred: Instrument Liquidity Tiering
 
 **Status: not started. Concrete follow-on, not an implicit gap.**

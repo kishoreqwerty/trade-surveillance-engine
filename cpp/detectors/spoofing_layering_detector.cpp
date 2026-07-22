@@ -18,7 +18,31 @@ Side opposite_of(Side side) { return side == Side::kBuy ? Side::kSell : Side::kB
 std::string concurrency_key(const std::string& account_id, const std::string& instrument_id, Side side) {
     return account_id + "|" + instrument_id + "|" + (side == Side::kBuy ? "B" : "S");
 }
+
+std::string instrument_side_key(const std::string& instrument_id, Side side) {
+    return instrument_id + "|" + (side == Side::kBuy ? "B" : "S");
+}
 }  // namespace
+
+void SpoofingLayeringDetector::update_ambient(const OrderBook& book, const std::string& instrument_id,
+                                               int64_t event_ts) {
+    for (Side side : {Side::kBuy, Side::kSell}) {
+        AmbientTracker& tracker = ambient_by_instrument_side_[instrument_side_key(instrument_id, side)];
+        const std::optional<double> price = book.best_price(side);
+        if (tracker.last_best_price.has_value() && price.has_value() && *price != *tracker.last_best_price) {
+            tracker.recent_move_timestamps.push_back(event_ts);
+        }
+        while (!tracker.recent_move_timestamps.empty() &&
+               event_ts - tracker.recent_move_timestamps.front() > config_.density_window_ns) {
+            tracker.recent_move_timestamps.pop_front();
+        }
+        while (!tracker.recent_concurrent_samples.empty() &&
+               event_ts - tracker.recent_concurrent_samples.front().timestamp_ns > config_.density_window_ns) {
+            tracker.recent_concurrent_samples.pop_front();
+        }
+        if (price.has_value()) tracker.last_best_price = price;
+    }
+}
 
 void SpoofingLayeringDetector::track_new(const OrderBook& book, const Order& order) {
     TrackedOrder tracked;
@@ -34,7 +58,14 @@ void SpoofingLayeringDetector::track_new(const OrderBook& book, const Order& ord
     tracked.opposite_best_at_placement = book.best_price(opposite_of(order.side));
 
     tracked_[order.order_id] = tracked;
-    ++concurrent_count_by_key_[concurrency_key(tracked.account_id, tracked.instrument_id, tracked.side)];
+    const int new_count = ++concurrent_count_by_key_[concurrency_key(tracked.account_id, tracked.instrument_id, tracked.side)];
+
+    // Record this as an ambient sample of "what's a typical concurrent
+    // count right now" -- pooled across accounts (account_id kept so a
+    // tracked order's own account can be excluded from its own baseline
+    // later, see AmbientTracker's comment).
+    AmbientTracker& tracker = ambient_by_instrument_side_[instrument_side_key(order.instrument_id, order.side)];
+    tracker.recent_concurrent_samples.push_back({order.timestamp_ns, order.account_id, new_count});
 }
 
 std::optional<SpoofingLayeringDetector::TrackedOrder> SpoofingLayeringDetector::erase_tracked(
@@ -106,15 +137,66 @@ std::vector<Alert> SpoofingLayeringDetector::handle_cancel(const OrderBook& book
         moved_favorably = tracked.side == Side::kBuy ? (delta >= config_.min_opposite_price_move)
                                                       : (delta <= -config_.min_opposite_price_move);
     }
-    const double move_score = moved_favorably ? 1.0 : 0.0;
+    // Density-normalized (Phase 11.5): a move that recent ambient churn
+    // alone would statistically produce during a dwell this long isn't
+    // evidence of this specific order's influence -- see class comment.
+    //
+    // effective_dwell_s is capped at slow_time_in_book_ns, not the order's
+    // full (possibly much longer) dwell: past that point speed_score is
+    // already at its floor (0), so the detector has already signalled
+    // "not fast" through that channel -- extrapolating the move-rate
+    // discount further out adds no new information, it only compounds
+    // the same signal a second time. Found necessary via the real Sarao
+    // validation case: its historically-documented ~8s dwells (already
+    // long enough to floor speed_score) were, before this cap, ALSO
+    // taking a disproportionate move_score discount purely from dwell
+    // length, dropping 5 of 25 previously-firing alerts below threshold
+    // (the zero-concurrent-layering tier specifically) -- not a
+    // hypothetical, a measured regression this cap fixes.
+    double move_score = 0.0;
+    if (moved_favorably) {
+        const auto opp_it =
+            ambient_by_instrument_side_.find(instrument_side_key(tracked.instrument_id, opposite_of(tracked.side)));
+        double recent_move_rate = 0.0;  // moves/sec
+        if (opp_it != ambient_by_instrument_side_.end() && config_.density_window_ns > 0) {
+            const double window_s = static_cast<double>(config_.density_window_ns) / 1e9;
+            recent_move_rate = static_cast<double>(opp_it->second.recent_move_timestamps.size()) / window_s;
+        }
+        const double dwell_s = static_cast<double>(time_in_book_ns) / 1e9;
+        const double dwell_cap_s = static_cast<double>(config_.slow_time_in_book_ns) / 1e9;
+        const double effective_dwell_s = std::min(dwell_s, dwell_cap_s);
+        const double expected_moves_during_dwell = recent_move_rate * effective_dwell_s;
+        move_score = std::clamp(1.0 - expected_moves_during_dwell, 0.0, 1.0);
+    }
 
     const int concurrent = count_concurrent_same_account_same_side(tracked.account_id, tracked.instrument_id,
                                                                      tracked.side);
-    const double layering_score = config_.layering_saturation_count > 0
-                                       ? std::clamp(static_cast<double>(concurrent) /
-                                                         static_cast<double>(config_.layering_saturation_count),
-                                                     0.0, 1.0)
-                                       : 0.0;
+    // Density-normalized (Phase 11.5): subtract off "what's a typical
+    // concurrent count for OTHER accounts right now" before comparing
+    // against the saturation scale -- see class comment. Deliberately
+    // excludes tracked.account_id's own samples: including them made an
+    // account's own layering the dominant contributor to what counted as
+    // "typical," partially normalizing away the very pattern being
+    // evaluated (found via a failing existing test, not assumed safe).
+    double typical_concurrent = 0.0;
+    const auto same_side_it =
+        ambient_by_instrument_side_.find(instrument_side_key(tracked.instrument_id, tracked.side));
+    if (same_side_it != ambient_by_instrument_side_.end()) {
+        double sum = 0.0;
+        int count = 0;
+        for (const auto& sample : same_side_it->second.recent_concurrent_samples) {
+            if (sample.account_id == tracked.account_id) continue;
+            sum += sample.concurrent_count;
+            ++count;
+        }
+        if (count > 0) typical_concurrent = sum / static_cast<double>(count);
+    }
+    const double layering_score =
+        config_.layering_saturation_count > 0
+            ? std::clamp((static_cast<double>(concurrent) - typical_concurrent) /
+                              static_cast<double>(config_.layering_saturation_count),
+                          0.0, 1.0)
+            : 0.0;
 
     const double primary = (depth_score + speed_score + move_score) / 3.0;
     const double combined = std::clamp(primary + config_.layering_bonus_weight * layering_score, 0.0, 1.0);
@@ -131,7 +213,10 @@ std::vector<Alert> SpoofingLayeringDetector::handle_cancel(const OrderBook& book
     alert.window_end_ns = order.timestamp_ns;
     alert.evidence = "depth_ratio=" + std::to_string(depth_score) + " speed=" + std::to_string(speed_score) +
                       " opposite_price_moved_favorably=" + (moved_favorably ? std::string("true") : "false") +
+                      " move_score=" + std::to_string(move_score) +
                       " concurrent_same_side_orders=" + std::to_string(concurrent) +
+                      " typical_concurrent=" + std::to_string(typical_concurrent) +
+                      " layering_score=" + std::to_string(layering_score) +
                       " time_in_book_ns=" + std::to_string(time_in_book_ns);
     alert.book_snapshot_sequence = book.sequence();
     return {alert};
@@ -139,6 +224,16 @@ std::vector<Alert> SpoofingLayeringDetector::handle_cancel(const OrderBook& book
 
 std::vector<Alert> SpoofingLayeringDetector::evaluate(const OrderBook& book, const DetectorEvent& incoming,
                                                        const AccountRegistry& /*accounts*/) {
+    // Keeps ambient_by_instrument_side_ current for EVERY event, not just
+    // ones this detector otherwise acts on -- any event can move a best
+    // price, and move_score/layering_score both depend on that staying
+    // up to date regardless of which branch below runs.
+    if (const auto* order = std::get_if<Order>(&incoming)) {
+        update_ambient(book, order->instrument_id, order->timestamp_ns);
+    } else if (const auto* execution = std::get_if<Execution>(&incoming)) {
+        update_ambient(book, execution->instrument_id, execution->timestamp_ns);
+    }
+
     if (const auto* order = std::get_if<Order>(&incoming)) {
         switch (order->status) {
             case OrderStatus::kNew:
