@@ -33,6 +33,21 @@ bool by_timestamp_execution(const Execution& a, const Execution& b) { return a.t
 SimulationOutput generate_simulation(const SimulatorConfig& config) {
     std::mt19937_64 rng(config.random_seed);
 
+    // Deliberately independent from `rng` above (used for baseline flow),
+    // not just a second draw from the same generator: abuse-scenario
+    // generation must not depend on how many random draws baseline flow
+    // happened to consume, which varies with baseline_orders_per_second.
+    // A single shared stream meant every scenario's own random parameters
+    // (which instrument, timing jitter, price-step direction, etc.) would
+    // silently shift whenever the order rate changed, confounding any
+    // attempt to isolate a rate-driven effect on detector recall from pure
+    // RNG-state drift -- found while investigating SpoofingLayeringDetector's
+    // noisy, non-monotonic recall trajectory across a Row 6 rate sweep (see
+    // PARAMETER_MAPPING.md's Row 6 section). 0x9E3779B97F4A7C15ULL is the
+    // standard golden-ratio hash-mixing constant, used only to decorrelate
+    // the two seeds -- not a magic number specific to this project.
+    std::mt19937_64 abuse_rng(config.random_seed ^ 0x9E3779B97F4A7C15ULL);
+
     int64_t session_end_ns = config.session_start_ns + config.session_duration_ns;
 
     std::vector<Instrument> instruments = build_instrument_universe(
@@ -56,44 +71,55 @@ SimulationOutput generate_simulation(const SimulatorConfig& config) {
     std::vector<Execution> executions = std::move(baseline.executions);
 
     int64_t anchor_hi = std::max(config.session_start_ns, session_end_ns - kScenarioMarginNs);
-    auto random_anchor = [&]() { return uniform_int64(rng, config.session_start_ns, anchor_hi); };
+    auto random_anchor = [&]() { return uniform_int64(abuse_rng, config.session_start_ns, anchor_hi); };
 
     for (int i = 0; i < config.wash_trade.count; ++i) {
-        const Instrument& instrument = pick_random(instruments, rng);
-        auto pair = account_registry.random_linked_pair(rng);
+        const Instrument& instrument = pick_random(instruments, abuse_rng);
+        auto pair = account_registry.random_linked_pair(abuse_rng);
         auto scenario = generate_wash_trade_scenario(
-            rng, order_id_gen, trade_id_gen, wash_scenario_gen.next(), instrument, pair.first, pair.second,
+            abuse_rng, order_id_gen, trade_id_gen, wash_scenario_gen.next(), instrument, pair.first, pair.second,
             reference_price(instrument), random_anchor(), config.wash_trade.severity, kVenue);
         append(orders, std::move(scenario.orders));
         append(executions, std::move(scenario.executions));
     }
 
     for (int i = 0; i < config.spoofing_layering.count; ++i) {
-        const Instrument& instrument = pick_random(instruments, rng);
-        const Account& account = account_registry.random_independent(rng);
+        const Instrument& instrument = pick_random(instruments, abuse_rng);
+        const Account& account = account_registry.random_independent(abuse_rng);
         auto scenario = generate_spoofing_layering_scenario(
-            rng, order_id_gen, trade_id_gen, spoof_scenario_gen.next(), instrument, account,
+            abuse_rng, order_id_gen, trade_id_gen, spoof_scenario_gen.next(), instrument, account,
             reference_price(instrument), random_anchor(), config.spoofing_layering.severity, kVenue);
         append(orders, std::move(scenario.orders));
         append(executions, std::move(scenario.executions));
     }
 
     for (int i = 0; i < config.marking_the_close.count; ++i) {
-        const Instrument& instrument = pick_random(instruments, rng);
-        std::vector<Account> pool;
-        for (int j = 0; j < 3; ++j) pool.push_back(account_registry.random_independent(rng));
+        const Instrument& instrument = pick_random(instruments, abuse_rng);
+        // Phase 11.5: a genuinely related pair, not independent accounts --
+        // otherwise the scenario never exercises MarkingTheCloseDetector's
+        // beneficial-owner/linked-account aggregation (Task 1), since
+        // independent accounts are guaranteed unrelated by construction
+        // (account_registry.cpp: unique beneficial_owner_id per account).
+        // generate_marking_the_close_scenario()'s own accounts_used (capped
+        // at 2, see marking_the_close.cpp) decides how many of these two
+        // get used for a given severity; the second is simply unused when
+        // accounts_used==1, at no cost.
+        auto pair = account_registry.random_linked_pair(abuse_rng);
+        std::vector<Account> pool = {pair.first, pair.second};
         auto scenario = generate_marking_the_close_scenario(
-            rng, order_id_gen, trade_id_gen, mtc_scenario_gen.next(), instrument, pool,
-            reference_price(instrument), config.marking_the_close.severity, kVenue);
+            abuse_rng, order_id_gen, trade_id_gen, mtc_scenario_gen.next(), instrument, pool,
+            reference_price(instrument), config.marking_the_close.severity, config.baseline_orders_per_second,
+            config.num_equity_instruments + config.num_fx_instruments + config.num_fixed_income_instruments,
+            kVenue);
         append(orders, std::move(scenario.orders));
         append(executions, std::move(scenario.executions));
     }
 
     for (int i = 0; i < config.front_running.count; ++i) {
-        const Instrument& instrument = pick_random(instruments, rng);
-        auto pair = account_registry.random_linked_pair(rng);
+        const Instrument& instrument = pick_random(instruments, abuse_rng);
+        auto pair = account_registry.random_linked_pair(abuse_rng);
         auto scenario = generate_front_running_scenario(
-            rng, order_id_gen, trade_id_gen, fr_scenario_gen.next(), instrument, pair.first, pair.second,
+            abuse_rng, order_id_gen, trade_id_gen, fr_scenario_gen.next(), instrument, pair.first, pair.second,
             reference_price(instrument), random_anchor(), config.front_running.severity, kVenue);
         append(orders, std::move(scenario.orders));
         append(executions, std::move(scenario.executions));

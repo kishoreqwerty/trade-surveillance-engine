@@ -7,3 +7,4 @@ quotes.csv
 output/*
 !output/.gitkeep
 !output/stylized_facts.json
+venv/

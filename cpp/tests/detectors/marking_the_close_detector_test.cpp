@@ -1,5 +1,7 @@
 #include "marking_the_close_detector.hpp"
 
+#include <algorithm>
+
 #include <gtest/gtest.h>
 
 #include "account_registry.hpp"
@@ -7,6 +9,7 @@
 
 using tse::detectors::AccountRegistry;
 using tse::detectors::DetectorEvent;
+using tse::detectors::Entity;
 using tse::detectors::MarkingTheCloseConfig;
 using tse::detectors::MarkingTheCloseDetector;
 using tse::fix::Execution;
@@ -185,4 +188,86 @@ TEST(MarkingTheCloseDetector, IgnoresOrderEventsEntirely) {
 
     auto alerts = detector.evaluate(book, DetectorEvent{order}, accounts);
     EXPECT_TRUE(alerts.empty());
+}
+
+// Phase 11.5: closes the per-account evasion path -- two related accounts
+// (same beneficial owner), EACH individually below concentration_threshold,
+// EACH trading with its own unrelated counterparty (never with each
+// other -- proving grouping doesn't just catch direct wash-trade-shaped
+// pairs), must be aggregated into one entity before the concentration
+// check.
+TEST(MarkingTheCloseDetector, RelatedAccountsSplittingVolumeAreAggregatedAndFireTogether) {
+    OrderBook book(kInstrument);
+    MarkingTheCloseDetector detector(default_config());
+    AccountRegistry accounts;
+    accounts.add(Entity{"LINKED-A", "OWNER1", "client", {}});
+    accounts.add(Entity{"LINKED-B", "OWNER1", "client", {}});
+
+    // Ambient baseline first (same pattern as DominantPairCrossingThresholdFires
+    // above) -- without this, LINKED-A's own first trade would trivially be
+    // 100% of window volume so far, the exact degenerate case
+    // min_total_window_qty_threshold exists to guard against.
+    detector.evaluate(book, DetectorEvent{make_exec("BASE1", "BASE2", 1000, 90'500'000'000)}, accounts);
+
+    // LINKED-A trades with an unrelated counterparty: 500/1500 = 0.333 alone -- below threshold.
+    EXPECT_TRUE(
+        detector.evaluate(book, DetectorEvent{make_exec("LINKED-A", "OTHER-A", 500, 91'000'000'000)}, accounts)
+            .empty());
+
+    // LINKED-B (never trades with LINKED-A) pushes the GROUP's combined
+    // share to (500+500)/2000 = 0.5 -- above threshold, must fire.
+    auto alerts =
+        detector.evaluate(book, DetectorEvent{make_exec("LINKED-B", "OTHER-B", 500, 93'000'000'000)}, accounts);
+
+    ASSERT_EQ(alerts.size(), 1u);  // only LINKED-B's own side fires (OTHER-B alone is well under threshold)
+    std::vector<std::string> account_ids = alerts[0].account_ids;
+    std::sort(account_ids.begin(), account_ids.end());
+    EXPECT_EQ(account_ids, (std::vector<std::string>{"LINKED-A", "LINKED-B"}));
+    EXPECT_NEAR(alerts[0].score, 1000.0 / 2000.0, 1e-9);
+    std::vector<std::string> order_ids = alerts[0].order_ids;
+    std::sort(order_ids.begin(), order_ids.end());
+    EXPECT_EQ(order_ids,
+              (std::vector<std::string>{"EXE-LINKED-A-91000000000", "EXE-LINKED-B-93000000000"}));
+}
+
+// Phase 11.5, the specific case requested for review: a group's alerted_
+// status must survive a LATER composition change. LINKED-A and LINKED-B
+// fire together as a group; a third account (LINKED-C, related to both,
+// but not yet SEEN by the detector) then trades for the first time,
+// causing the detector to discover it belongs to the same group. LINKED-C's
+// own trade is sized so that, absent the carried-over alerted_ status, the
+// newly-merged group's share would clearly clear the threshold again
+// (proving this isn't a fire-free coincidence) -- but it must NOT
+// spuriously re-fire, because the group it just joined already fired.
+TEST(MarkingTheCloseDetector, GroupAlertedStatusSurvivesLaterCompositionChange) {
+    OrderBook book(kInstrument);
+    MarkingTheCloseDetector detector(default_config());
+    AccountRegistry accounts;
+    accounts.add(Entity{"LINKED-A", "OWNER1", "client", {}});
+    accounts.add(Entity{"LINKED-B", "OWNER1", "client", {}});
+    accounts.add(Entity{"LINKED-C", "OWNER1", "client", {}});  // related to A/B from the start in the registry
+
+    // Ambient baseline first -- see the comment in the previous test for why.
+    detector.evaluate(book, DetectorEvent{make_exec("BASE1", "BASE2", 1000, 90'500'000'000)}, accounts);
+
+    // LINKED-A alone: 500/1500 = 0.333 -- below threshold, no fire.
+    EXPECT_TRUE(
+        detector.evaluate(book, DetectorEvent{make_exec("LINKED-A", "OTHER-A", 500, 91'000'000'000)}, accounts)
+            .empty());
+
+    // LINKED-B (unseen until now) is discovered related to LINKED-A;
+    // combined group share (500+500)/2000 = 0.5 fires.
+    auto first =
+        detector.evaluate(book, DetectorEvent{make_exec("LINKED-B", "OTHER-B", 500, 93'000'000'000)}, accounts);
+    ASSERT_EQ(first.size(), 1u);
+
+    // LINKED-C trades for the first time. The detector discovers (via the
+    // registry, not anything that changed) that LINKED-C is also related to
+    // LINKED-A/LINKED-B, merging it into the same group. If the newly
+    // merged group's alerted_ status did NOT carry over, this would fire
+    // again: (500+500+600)/2600 = 0.615, comfortably above 0.4. It must not.
+    auto second =
+        detector.evaluate(book, DetectorEvent{make_exec("LINKED-C", "OTHER-C", 600, 95'000'000'000)}, accounts);
+    EXPECT_TRUE(second.empty())
+        << "group must not re-fire when a new member is discovered post-hoc -- the group already fired";
 }

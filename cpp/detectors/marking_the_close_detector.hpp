@@ -57,10 +57,22 @@ struct MarkingTheCloseConfig {
 // legitimately exceed 50% if it's the dominant counterparty across most of
 // the window's prints.
 //
-// Alerts once per (instrument, account) per detector lifetime, not once
-// per qualifying Execution — an account that's already cleared both bars
-// doesn't need to keep re-alerting as it keeps trading through the same
-// close.
+// Alerts once per (instrument, account-GROUP) per detector lifetime, not
+// once per qualifying Execution — an account that's already cleared both
+// bars doesn't need to keep re-alerting as it keeps trading through the
+// same close.
+//
+// Phase 11.5: concentration is checked against an account's beneficial-
+// owner/linked-account GROUP, not the raw account_id alone — reusing
+// AccountRegistry::is_related() (the exact relation WashTradeDetector
+// already uses), via an incremental union-find discovered as new accounts
+// are first seen. This closes a real evasion path a per-account-only check
+// left open: splitting a marking-the-close scheme's volume across 2-3
+// related accounts kept each individual account's own share under
+// concentration_threshold even when their COMBINED share obviously
+// dominated the close. See PARAMETER_MAPPING.md for the investigation that
+// found and fixed this (a per-account rate sweep first exposed it as an
+// apparent detector limitation before this fix).
 class MarkingTheCloseDetector : public IDetector {
 public:
     explicit MarkingTheCloseDetector(MarkingTheCloseConfig config);
@@ -71,9 +83,26 @@ public:
     std::string name() const override { return "MarkingTheCloseDetector"; }
 
 private:
-    std::vector<Alert> handle_execution(const tse::fix::Execution& execution, int64_t book_snapshot_sequence);
+    std::vector<Alert> handle_execution(const tse::fix::Execution& execution, int64_t book_snapshot_sequence,
+                                         const AccountRegistry& accounts);
     std::optional<Alert> check_account(const std::string& instrument_id, const std::string& account_id,
-                                        int64_t window_start_ns, int64_t event_ts, int64_t book_snapshot_sequence);
+                                        int64_t window_start_ns, int64_t event_ts, int64_t book_snapshot_sequence,
+                                        const AccountRegistry& accounts);
+
+    // Registers account_id (if not already known) and unions its group with
+    // every previously-seen account it's is_related() to. O(accounts seen
+    // so far) per NEW account, not per execution -- cheap at this project's
+    // account-pool scale, and only ever runs once per distinct account_id.
+    void register_and_group(const std::string& account_id, const AccountRegistry& accounts);
+    // Path-compressed union-find lookup. Deliberately NOT used as a storage
+    // key anywhere (see .cpp) -- representatives can change identity across
+    // a later merge, so anything stored under one would silently go stale.
+    std::string find_group(const std::string& account_id);
+    // Every raw account_id currently in the same group as account_id,
+    // freshly resolved via find_group() -- never cached, so a merge
+    // discovered after some volume/alert state already exists is picked up
+    // correctly on the next check, not silently missed.
+    std::vector<std::string> group_members(const std::string& account_id);
 
     MarkingTheCloseConfig config_;
     std::unordered_map<std::string, int64_t> total_window_qty_;    // key: instrument_id
@@ -91,6 +120,12 @@ private:
     // (which scores Alerts purely off Alert::order_ids and got a
     // structural 0 TP for this detector until this was added).
     std::unordered_map<std::string, std::vector<std::string>> trade_ids_by_key_;
+
+    // Union-find over account_id, global (not instrument-scoped) since
+    // relatedness is a property of the accounts themselves, not of a
+    // specific instrument's window.
+    std::unordered_map<std::string, std::string> group_parent_;
+    std::unordered_set<std::string> all_accounts_seen_;
 };
 
 }  // namespace tse::detectors

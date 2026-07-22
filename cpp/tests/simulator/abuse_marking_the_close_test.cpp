@@ -6,6 +6,7 @@
 
 #include "abuse/marking_the_close.hpp"
 #include "instrument_universe.hpp"
+#include "simulator.hpp"
 
 using namespace tse::simulator;
 
@@ -32,8 +33,9 @@ TEST(MarkingTheCloseInjector, AllTradesLandBeforeSessionCloseAndCarryLabel) {
     auto instrument = make_instrument(close_ns);
     auto accounts = make_accounts(3);
 
-    auto scenario = generate_marking_the_close_scenario(rng, order_gen, trade_gen, "SCN-MTC-TEST",
-                                                          instrument, accounts, 100.0, 0.5, "SIM");
+    auto scenario = generate_marking_the_close_scenario(rng, order_gen, trade_gen, "SCN-MTC-TEST", instrument,
+                                                          accounts, 100.0, 0.5,
+                                                          kEmpiricalOrderArrivalRatePerInstrumentPerSecond, 1, "SIM");
 
     ASSERT_FALSE(scenario.orders.empty());
     for (const auto& order : scenario.orders) {
@@ -50,13 +52,15 @@ TEST(MarkingTheCloseInjector, HigherSeverityClustersTighterToCloseWithFewerAccou
 
     std::mt19937_64 rng_low(2);
     IdGenerator order_gen_low("ORD"), trade_gen_low("EXE");
-    auto low = generate_marking_the_close_scenario(rng_low, order_gen_low, trade_gen_low, "SCN-LOW",
-                                                    instrument, accounts, 100.0, 0.0, "SIM");
+    auto low = generate_marking_the_close_scenario(rng_low, order_gen_low, trade_gen_low, "SCN-LOW", instrument,
+                                                    accounts, 100.0, 0.0,
+                                                    kEmpiricalOrderArrivalRatePerInstrumentPerSecond, 1, "SIM");
 
     std::mt19937_64 rng_high(2);
     IdGenerator order_gen_high("ORD"), trade_gen_high("EXE");
-    auto high = generate_marking_the_close_scenario(rng_high, order_gen_high, trade_gen_high, "SCN-HIGH",
-                                                      instrument, accounts, 100.0, 1.0, "SIM");
+    auto high = generate_marking_the_close_scenario(rng_high, order_gen_high, trade_gen_high, "SCN-HIGH", instrument,
+                                                      accounts, 100.0, 1.0,
+                                                      kEmpiricalOrderArrivalRatePerInstrumentPerSecond, 1, "SIM");
 
     int64_t low_earliest = low.orders.front().timestamp_ns;
     int64_t high_earliest = high.orders.front().timestamp_ns;

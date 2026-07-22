@@ -123,6 +123,175 @@ naturally scores in the 0.40–0.49 range. A uniform cross-detector 0.5 cutoff
 is too strict for this detector's score scale specifically — exactly why
 the full sweep (not the single headline number) is the number that matters.
 
+**Phase 11 update — recall collapsed further after the real order-rate
+recalibration (Row 6), root-caused, partially addressed on the generator
+side, two remaining limitations found and documented rather than patched
+(both are detector-config values, out of Phase 11's scope per the build
+guide's "recalibrate Phase 1's generator parameters" — Phase 5's detectors
+are validated standalone and sealed, not tuned against the generator).**
+
+Recalibrating `baseline_orders_per_second` to the real WRDS-derived rate
+(`calibration/PARAMETER_MAPPING.md`'s Row 6, ~16.69 events/sec/instrument,
+up from an old placeholder ~70x smaller) pushed this detector's TP to 0 at
+every rate tested (a rate sweep from 3 to 250.35/sec — see
+`PARAMETER_MAPPING.md`'s Row 6 section for the full table), even at the
+*old* rate where it used to fire (TP=10). Root cause: `check_account()`'s
+`total_qty` (denominator) is real ambient closing-window volume, which
+scales directly with order rate; the scenario generator's own injected
+volume didn't scale with it at all (a flat, density-independent constant)
+— so the scenario's concentration share was diluted toward zero as
+realistic order density rose.
+
+Fixed on the generator side (`abuse/marking_the_close.cpp`): the
+scenario's own volume is now sized relative to *expected* ambient
+closing-window volume, computed from `orders_per_second`/instrument count
+(the same values driving baseline density), not a flat constant — same
+anchoring principle as the `SpoofingLayeringDetector` dwell-time fix
+above. This restores true positives at high severity (`accounts_used=1`,
+a single dominant account) — confirmed by running the real detector class
+directly against the real chronological execution stream (not a
+reimplementation): all target accounts do cross the 0.4 threshold near
+the close.
+
+Two limitations surfaced while building and verifying that fix. The first
+was later closed properly (Phase 11.5, below, a deliberate and explicitly
+scoped exception to "detector thresholds stay fixed" — not a silent
+reopening); the second remains open.
+
+1. **~~Structural: `concentration_threshold` is checked per-`account_id`,
+   not per-`accounts_used`-scenario-total.~~ Closed in Phase 11.5 — see
+   that section below.** At moderate/low severity (`accounts_used=2` or
+   `3`), each account's *individual* share was capped, as total scenario
+   volume →∞, at `1/accounts_used` of the total (the other scenario
+   accounts' own volume diluted it too) — clearing 0.4 with 2+ accounts
+   would have required unrealistic absolute volume. Originally documented
+   as a real, unpatched weakness of *per-account* (not
+   per-beneficial-owner) concentration monitoring, mirroring a genuine
+   real-surveillance limitation — but on reflection this specific gap
+   (an account can trivially evade a same-owner/linked-account check by
+   splitting volume across related accounts) was judged closeable without
+   crossing into "tuning a detection threshold": `WashTradeDetector`
+   already had the exact relatedness primitive needed
+   (`AccountRegistry::is_related()`), so `MarkingTheCloseDetector` now
+   aggregates by beneficial-owner/linked-account group before computing
+   share, reusing it rather than reinventing anything. Full writeup,
+   including two false alarms in this investigation's own diagnostic
+   tooling, in Phase 11.5 below.
+
+2. **`min_total_window_qty_threshold=500`** (a safeguard against "the
+   very first trade of an otherwise-empty window trivially looking like
+   100% of volume so far," per this detector's own class comment) is now
+   effectively inert: at Row 1's calibrated execution size (mean ~48
+   qty/execution) and Row 6's calibrated rate, 500 total qty accumulates
+   after roughly 10 executions — a fraction of a second into the window,
+   not "enough window activity for the ratio to be meaningful." Found by
+   driving the real detector against the real event stream directly:
+   at severity=0.9, 56 alerts fired against only 10 legitimate scenario
+   accounts — the other ~46 are spurious, firing on ordinary baseline
+   accounts within the first few hundred milliseconds of the 300s window,
+   before enough volume has accumulated for the ratio to mean anything.
+   This safeguard's threshold value was evidently sized for a much
+   smaller placeholder execution-size regime and needs its own
+   recalibration to stay meaningful — but per the same Phase 11 scope
+   boundary as `concentration_threshold`, that's a detector-config change,
+   not a generator one, and is documented here rather than patched.
+
+Net, honest result at the time this Phase 11 section was written: at the
+harness's default severity (0.5), this detector's TP was 0 both before
+and after the Phase 11 generator fix — but the *reason* changed from
+"swamped by unrelated ambient volume growth" (a real generator-
+calibration bug, fixed here) to "structurally unreachable at this
+severity's account-split, by the detector's own per-account design" (a
+real, pre-existing detector limitation, correctly exposed rather than
+masked). See Phase 11.5 below for how that second issue was subsequently
+closed, and the FP/`min_total_window_qty_threshold` situation, which is
+still open.
+
+## Phase 11.5 — closing MarkingTheCloseDetector's evasion gap
+
+Full investigation and exact numbers in `calibration/PARAMETER_MAPPING.md`'s
+"Phase 11.5" section — summarized here for this detector's own findings
+history.
+
+**What changed:** `MarkingTheCloseDetector::check_account()` now
+aggregates by beneficial-owner/linked-account group (reusing
+`AccountRegistry::is_related()`, the same relation `WashTradeDetector`
+already uses) before computing concentration share, closing the evasion
+path where splitting scheme volume across 2+ related accounts evaded a
+per-account check at any volume. The generator's own scenario pool was
+also fixed to draw a genuinely related pair (`random_linked_pair()`
+instead of `random_independent()`) — otherwise the aggregation fix had
+nothing to exercise, which is exactly what a first rate-sweep after the
+detector fix alone confirmed (zero change in the numbers).
+
+**Two false alarms in this investigation's own tooling, both run to
+ground before any more product code was touched:** first, a standalone
+diagnostic used to trace the fix directly against the real detector class
+had its own bug (never populated its `AccountRegistry`, so grouping
+silently never triggered) — not a `marking_the_close_detector.cpp` bug.
+Second, once grouping was confirmed correct and legitimate group alerts
+were firing (verified identical via both a direct trace and the real
+Kafka-replay path the actual harness uses), the harness's confusion
+matrix still showed TP=0 — because every legitimate alert scored
+0.40–0.42, comfortably above this detector's own 0.4
+`concentration_threshold` but below the evaluation harness's uniform
+cross-detector 0.5 headline threshold. This is the *same* scoring-scale
+caveat already on record earlier in this document ("MarkingTheCloseDetector
+— a real evidence-contract bug... plus a scoring-scale caveat") —
+rediscovered mid-investigation, not a new bug.
+
+**Result at the correct threshold (0.4, this detector's own scale):**
+recall went from 0 (structurally unreachable, per the closed limitation
+above) to a genuine, non-trivial 0.514 at the final calibrated rate — up
+from Phase 10's original 0.314 at the same threshold, before any of this
+project's density-realism work began. Precision still degrades with
+order-flow density (FP climbing smoothly from 13 at 3/sec to 337 at
+250.35/sec, no cliff) — driven by the still-open
+`min_total_window_qty_threshold=500` limitation above, now more visible
+because 2-account combinations have more ways to spuriously coincide
+early in a still-thin window than single accounts did. Full rate-sweep
+and severity-gradient tables in `PARAMETER_MAPPING.md`.
+
+**The non-monotonic severity gradient — investigated and confirmed, not
+just plausible.** Recall at the final calibrated rate peaks at
+severity=0.5 (0.514) and *declines* at 0.7 (0.367) and 0.9 (0.207),
+unlike every other detector's gradient in this project. Checked directly
+before accepting it as understood, since "more obvious abuse caught less
+reliably" would be backwards for a real detection system if it meant
+detection itself was failing: a purpose-built trace (driving the real
+detector class, tracking for each of the 15 scenarios how many of its own
+trade_ids had executed by the moment its group's alert fired) shows
+**every single scenario fires at every severity tested (0.5, 0.7, 0.9) —
+zero "never fired" cases.** Detection is not going backwards. What
+declines is the *fraction of a scenario's own trades credited* before its
+one-time alert fires:
+
+| severity | avg. fraction of own trades credited before firing |
+|---|---|
+| 0.5 | 0.488 |
+| 0.7 | 0.365 |
+| 0.9 | 0.205 |
+
+**Confirmed mechanism:** higher severity means a higher target
+concentration share (`k = lerp(0.15, 0.65, severity)` in
+`abuse/marking_the_close.cpp`), so the group's incrementally-accumulating
+share crosses the detector's fixed 0.4 `concentration_threshold` earlier
+in its own trade sequence — overshooting a bar by more means reaching it
+sooner, not needing the full trade sequence to get there. This detector's
+"alert once per group lifetime" design (`alerted_`, an explicit, correct
+choice documented in this detector's own class comment — a real
+streaming detector structurally cannot credit trades it hasn't seen yet
+at the moment it fires) then permanently forfeits evaluation credit for
+whatever trades follow. Not a bug: a real-time detector cannot know the
+future at fire time. It's specifically a property of the **per-trade-ID
+recall metric** this evaluation harness uses for `kExecution`-universe
+detectors, not of whether the scheme gets flagged — a scenario-level
+"did it fire at all" metric would show 100% at every severity tested.
+Left as-is (not changed to a scenario-level metric) since that's an
+evaluation-harness design choice orthogonal to Phase 11/11.5's
+generator/detector-aggregation scope, not something this investigation
+was asked to revisit.
+
 **SpoofingLayeringDetector — low recall (6.7%, 1 of 15 scenarios caught),
 root-caused to a Phase 1/Phase 5 calibration mismatch, not a detector
 defect.** Measured directly: of the 15 injected scenarios, only 1 had *any*
@@ -139,6 +308,60 @@ even get a chance to compensate. This is precisely the kind of
 generator/detector parameter mismatch Phase 11 exists to close ("Offline
 ... recalibrate Phase 1's generator parameters against \[real TAQ-derived
 cancellation-rate\] stats") — not something patched here.
+
+**Phase 11 update — the calibration mismatch above is fixed (`dwell_ns`
+now anchored to the detector's own `slow_time_in_book_ns`, see
+`PARAMETER_MAPPING.md`'s Rows 7-8), but a real order-rate recalibration
+(Row 6) exposed a second, different problem: a genuine density-sensitivity
+in this detector's own scoring, found, confirmed smooth (not a
+threshold-cliff/bug shape), and documented rather than patched — same
+scope boundary as `MarkingTheCloseDetector`'s findings above (detector
+config, not generator parameters).**
+
+Two of the four averaged signals are structurally more likely to cross
+their own bar purely by chance as ambient order-flow density rises,
+independent of whether a layer is genuinely spoofing:
+
+- `move_score` (binary: did the opposite side's best price move ≥1 tick
+  during the layer's dwell) — with more ambient order/cancel/price-walk
+  activity happening per second, the opposite-side touch is simply more
+  likely to tick at least once within any fixed dwell window, by chance
+  alone, regardless of this specific layer's own behavior.
+- `layering_score` (concurrent same-account-same-side order count ÷
+  `layering_saturation_count`) — with more total orders resting in the
+  book at any moment, the same account coincidentally having 2+ orders
+  open on the same side of the same instrument at once becomes more
+  likely by chance, not just from genuine layering.
+
+**Confirmed smooth, not a threshold-cliff, via an 11-point rate sweep**
+(3 to 250.35/sec, RNG-ordering confound removed — see `PARAMETER_MAPPING.md`'s
+Row 6 follow-on section) at the main eval config:
+
+```
+rate/sec    3     5     7     9     12    16    20    25    75    150   250.35
+FP          9     14    19    20    31    41    49    70    194   485   854
+precision  .786  .696  .620  .545  .367  .241  .210  .079  .044  .008  .005
+```
+
+FP climbs monotonically at every single point (no exceptions), and
+precision falls monotonically at every single point — the signature of a
+genuine density effect, not a bug that happens to trip past some specific
+volume. (Recall also declines across the same range, though noisier —
+`33,32,31,24,18,13,13,6,9,4,4` — some of that residual noise is expected
+scenario-to-scenario variance, not confound-driven, now that the RNG
+streams are separated.)
+
+**Named as a real limitation a production system would need to address,
+not just a synthetic-data artifact:** any surveillance detector whose
+signals are absolute (a raw price tick, a raw concurrent-order count)
+rather than normalized against prevailing market activity will see its
+false-positive rate rise with volume — a well-known problem in real
+market surveillance, not unique to this project. The two credible fixes
+— normalizing `move_score`/`layering_score` against a rolling measure of
+ambient activity (e.g. recent order/cancel rate for that instrument), or
+widening the reference window so short-term density fluctuations average
+out — are both detector-logic changes, out of Phase 11's scope
+(generator-only) and not implemented here.
 
 **FrontRunningDetector — was 0% recall due to a real detector-logic bug
 (not a generator/detector semantic disagreement as first suspected),

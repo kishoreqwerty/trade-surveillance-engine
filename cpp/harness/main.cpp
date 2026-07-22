@@ -25,6 +25,7 @@
 #include "simulator.hpp"
 
 using tse::simulator::AbusePattern;
+using tse::simulator::kEmpiricalOrderArrivalRatePerInstrumentPerSecond;
 using tse::simulator::SimulationOutput;
 using tse::simulator::SimulatorConfig;
 
@@ -61,10 +62,15 @@ SimulatorConfig main_eval_config() {
     config.random_seed = 777;
     config.session_start_ns = kEpochAnchorNs;
     config.session_duration_ns = 600LL * 1'000'000'000;  // 10 synthetic minutes
-    config.baseline_orders_per_second = 3.0;
     config.num_equity_instruments = 8;
     config.num_fx_instruments = 4;
     config.num_fixed_income_instruments = 3;
+    // Empirical rate is per-instrument (see simulator.hpp's own comment on
+    // kEmpiricalOrderArrivalRatePerInstrumentPerSecond) -- scale by this
+    // config's own instrument count, not the struct default's.
+    config.baseline_orders_per_second =
+        kEmpiricalOrderArrivalRatePerInstrumentPerSecond *
+        (config.num_equity_instruments + config.num_fx_instruments + config.num_fixed_income_instruments);
     config.num_independent_accounts = 150;
     config.num_linked_account_pairs = 30;
     config.wash_trade = {15, 0.5};
@@ -90,10 +96,12 @@ SimulatorConfig baseline_comparison_config() {
     config.random_seed = 999;
     config.session_start_ns = kEpochAnchorNs;
     config.session_duration_ns = 600LL * 1'000'000'000;
-    config.baseline_orders_per_second = 3.0;
     config.num_equity_instruments = 2;
     config.num_fx_instruments = 1;
     config.num_fixed_income_instruments = 0;
+    config.baseline_orders_per_second =
+        kEmpiricalOrderArrivalRatePerInstrumentPerSecond *
+        (config.num_equity_instruments + config.num_fx_instruments + config.num_fixed_income_instruments);
     config.num_independent_accounts = 15;
     config.num_linked_account_pairs = 5;
     config.wash_trade = {15, 0.5};
@@ -108,10 +116,12 @@ SimulatorConfig severity_gradient_config(double severity, uint64_t seed) {
     config.random_seed = seed;
     config.session_start_ns = kEpochAnchorNs;
     config.session_duration_ns = 300LL * 1'000'000'000;  // 5 synthetic minutes
-    config.baseline_orders_per_second = 2.0;
     config.num_equity_instruments = 8;
     config.num_fx_instruments = 4;
     config.num_fixed_income_instruments = 3;
+    config.baseline_orders_per_second =
+        kEmpiricalOrderArrivalRatePerInstrumentPerSecond *
+        (config.num_equity_instruments + config.num_fx_instruments + config.num_fixed_income_instruments);
     config.num_independent_accounts = 150;
     config.num_linked_account_pairs = 30;
     config.wash_trade = {10, severity};

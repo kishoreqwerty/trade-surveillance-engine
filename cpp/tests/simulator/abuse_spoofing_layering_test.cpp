@@ -30,7 +30,23 @@ TEST(SpoofingLayeringInjector, AllEventsShareScenarioLabel) {
     auto scenario = generate_spoofing_layering_scenario(rng, order_gen, trade_gen, "SCN-SPOOF-TEST",
                                                           instrument, account, 100.0, 0, 0.5, "SIM");
 
+    // Orders from the dedicated synthetic counterparty ("MKT-COUNTERPARTY",
+    // matching spoofing_layering.cpp's own kSyntheticCounterparty) are
+    // deliberately excluded here: they're market-structure scaffolding
+    // (the move_score anchor mechanism -- see that file's own comment on
+    // it), not the spoofing pattern itself, and must NOT carry the
+    // scenario's ground truth label -- doing so would make them count as
+    // positive-class events the detector can never actually fire on
+    // (SpoofingLayeringDetector's alert.order_ids only ever names the
+    // layer being cancelled), silently deflating Phase 10's measured
+    // recall. Asserted directly below, not just skipped, so a regression
+    // that accidentally re-labels them is caught.
     for (const auto& order : scenario.orders) {
+        if (order.account_id == "MKT-COUNTERPARTY") {
+            EXPECT_EQ(order.ground_truth_label.pattern, AbusePattern::kBaseline)
+                << "anchor/market-structure orders must stay unlabeled, not tagged as the scenario itself";
+            continue;
+        }
         EXPECT_EQ(order.ground_truth_label.pattern, AbusePattern::kSpoofingLayering);
         EXPECT_EQ(order.ground_truth_label.scenario_id, "SCN-SPOOF-TEST");
     }
@@ -48,8 +64,15 @@ TEST(SpoofingLayeringInjector, EveryLayerIsEventuallyCancelledButGenuineOrderIsN
     auto scenario = generate_spoofing_layering_scenario(rng, order_gen, trade_gen, "SCN", instrument,
                                                           account, 100.0, 0, 0.7, "SIM");
 
+    // Restricted to the account under investigation's own orders (the
+    // layers + the genuine order) -- excludes the separate, dedicated
+    // synthetic-counterparty "anchor" orders (spoofing_layering.cpp's
+    // move_score mechanism), which have their own independent
+    // New/Cancel/New lifecycle unrelated to this test's actual claim
+    // about the layers and the genuine order specifically.
     std::set<std::string> new_order_ids, cancelled_order_ids;
     for (const auto& order : scenario.orders) {
+        if (order.account_id != account.account_id) continue;
         if (order.status == OrderStatus::kNew) new_order_ids.insert(order.order_id);
         if (order.status == OrderStatus::kCancelled) cancelled_order_ids.insert(order.order_id);
     }
