@@ -1,0 +1,70 @@
+.metrics-legend {
+  display: flex;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+.legend-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+}
+
+.metrics-detector-block {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--gridline);
+}
+.metrics-detector-block:last-child {
+  border-bottom: none;
+}
+
+.metrics-detector-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.metrics-detector-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+.metrics-detector-threshold {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.metrics-baseline-tag {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+.metrics-baseline .metrics-detector-name {
+  color: var(--text-secondary);
+}
+
+.metric-bar-row {
+  display: grid;
+  grid-template-columns: 16px 1fr 44px;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+.metric-bar-label {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.metric-bar-track {
+  height: 8px;
+  background: var(--gridline);
+}
+.metric-bar-fill {
+  height: 100%;
+}
+.metric-bar-value {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: right;
+}

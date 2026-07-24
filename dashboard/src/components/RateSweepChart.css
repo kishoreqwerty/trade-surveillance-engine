@@ -1,0 +1,30 @@
+.rate-sweep-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.rate-sweep-line {
+  fill: none;
+  stroke: var(--series-8);
+  stroke-width: 2;
+}
+.rate-sweep-dot {
+  fill: var(--series-8);
+}
+.rate-sweep-axis {
+  stroke: var(--gridline);
+  stroke-width: 1;
+}
+.rate-sweep-label {
+  font-size: 9px;
+  fill: var(--text-muted);
+  font-family: var(--mono);
+}
+.rate-sweep-note {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin: 6px 0 0;
+}
+.rate-sweep-note strong {
+  color: var(--status-critical);
+}

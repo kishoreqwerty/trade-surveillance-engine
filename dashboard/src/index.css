@@ -1,80 +1,50 @@
-/* Palette per the dataviz skill's reference instance
-   (references/palette.md) -- used unmodified, not re-derived. */
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+@import "@fontsource/ibm-plex-mono/600.css";
+
+/* Dark-only terminal palette -- deliberately not theme-aware. A real
+   trading terminal doesn't respect OS light/dark; it's just dark. Status
+   colors (good/warning/serious/critical) are the dataviz skill's reserved
+   palette, kept unmodified; everything else is re-anchored to a near-black
+   surface for the Bloomberg-terminal aesthetic Phase 12 asked for. */
 :root {
-  color-scheme: light;
-  --surface-1: #fcfcfb;
-  --page: #f9f9f7;
-  --text-primary: #0b0b0b;
-  --text-secondary: #52514e;
-  --text-muted: #898781;
-  --gridline: #e1e0d9;
-  --baseline: #c3c2b7;
-  --border: rgba(11, 11, 11, 0.1);
+  color-scheme: dark;
+  --page: #09090a;
+  --surface-1: #121214;
+  --surface-2: #1a1a1d;
+  --text-primary: #e8e8e6;
+  --text-secondary: #9a9a96;
+  --text-muted: #616160;
+  --gridline: #232326;
+  --baseline: #2c2c2f;
+  --border: rgba(255, 255, 255, 0.09);
 
-  --series-1: #2a78d6; /* blue */
-  --series-2: #008300; /* green */
-  --series-3: #e87ba4; /* magenta */
-  --series-4: #eda100; /* yellow */
-  --series-5: #1baf7a; /* aqua */
-  --series-6: #eb6834; /* orange */
-  --series-7: #4a3aa7; /* violet */
-  --series-8: #e34948; /* red */
+  --series-1: #3987e5;
+  --series-2: #1baf7a;
+  --series-3: #d55181;
+  --series-4: #c98500;
+  --series-5: #29c2c2;
+  --series-6: #d95926;
+  --series-7: #9085e9;
+  --series-8: #e66767;
 
-  --status-good: #0ca30c;
-  --status-warning: #fab219;
-  --status-serious: #ec835a;
-  --status-critical: #d03b3b;
+  /* Semantic bid/ask -- always these two, never the categorical ramp. */
+  --bid: #2fbf6e;
+  --ask: #e5484d;
 
-  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  --status-good: #2fbf6e;
+  --status-warning: #d9a441;
+  --status-serious: #e08a4f;
+  --status-critical: #e5484d;
 
-  font: 15px/1.5 var(--sans);
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Consolas, monospace;
+
+  font: 13px/1.5 var(--mono);
   color: var(--text-primary);
   background: var(--page);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:where(:not([data-theme="light"])) {
-    color-scheme: dark;
-    --surface-1: #1a1a19;
-    --page: #0d0d0d;
-    --text-primary: #ffffff;
-    --text-secondary: #c3c2b7;
-    --text-muted: #898781;
-    --gridline: #2c2c2a;
-    --baseline: #383835;
-    --border: rgba(255, 255, 255, 0.1);
-
-    --series-1: #3987e5;
-    --series-3: #d55181;
-    --series-4: #c98500;
-    --series-5: #199e70;
-    --series-6: #d95926;
-    --series-7: #9085e9;
-    --series-8: #e66767;
-  }
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --surface-1: #1a1a19;
-  --page: #0d0d0d;
-  --text-primary: #ffffff;
-  --text-secondary: #c3c2b7;
-  --text-muted: #898781;
-  --gridline: #2c2c2a;
-  --baseline: #383835;
-  --border: rgba(255, 255, 255, 0.1);
-
-  --series-1: #3987e5;
-  --series-3: #d55181;
-  --series-4: #c98500;
-  --series-5: #199e70;
-  --series-6: #d95926;
-  --series-7: #9085e9;
-  --series-8: #e66767;
 }
 
 * {
@@ -91,6 +61,9 @@ h3 {
   color: var(--text-primary);
 }
 button {
+  font: inherit;
+}
+input {
   font: inherit;
 }
 .tabular {

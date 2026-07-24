@@ -1,7 +1,7 @@
-#root {
-  max-width: 1400px;
+.app-shell {
+  max-width: 1680px;
   margin: 0 auto;
-  padding: 16px;
+  padding: 10px;
   min-height: 100svh;
 }
 
@@ -10,11 +10,13 @@
   align-items: baseline;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 8px;
   flex-wrap: wrap;
 }
 .app-header h1 {
-  font-size: 20px;
+  font-size: 16px;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
 }
 
 .conn-badge {
@@ -28,7 +30,7 @@
   content: "";
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: 50%; /* a real dot -- not a "rounded box" softening */
   display: inline-block;
 }
 .conn-ok::before {
@@ -44,21 +46,55 @@
 .app-grid {
   display: grid;
   grid-template-columns: 1.3fr 1fr;
-  gap: 16px;
+  gap: 10px;
   align-items: start;
 }
 @media (max-width: 900px) {
   .app-grid {
     grid-template-columns: 1fr;
   }
+  .panel-queue,
+  .monitor-right-col {
+    height: auto !important;
+    max-height: 70svh;
+  }
+}
+
+/* Chrome above .app-grid (header + tab nav + KpiStrip + .app-shell's own
+   top padding), measured via a real DOM boundingClientRect, not guessed:
+   158px -- re-measured after KpiStrip was added above the grid (it
+   silently regressed this from 87px to 158px, re-opening the exact
+   below-the-fold bug fixed earlier; caught by re-running the same
+   viewport-fit verification, not assumed still correct). +23px covers
+   .app-shell's bottom padding and a small safety margin; verified
+   empirically to produce zero page-level scroll. Both columns share this
+   so Order Book+Event Timeline (right) and Alert Queue (left) bottom-align
+   at the same height. */
+.monitor-right-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: calc(100svh - 181px);
+  min-height: 0;
+}
+.monitor-right-col > .panel {
+  margin-bottom: 0;
+}
+.panel-book {
+  flex: none;
+}
+.panel-timeline {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .panel {
   background: var(--surface-1);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 16px 16px;
-  margin-bottom: 16px;
+  border-radius: 0;
+  padding: 6px 8px 8px;
+  margin-bottom: 10px;
 }
 
 .panel-header {
@@ -66,32 +102,33 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 12px;
+  margin-bottom: 6px;
   flex-wrap: wrap;
 }
 .panel-header h2 {
-  font-size: 14px;
+  font-size: 12px;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
   color: var(--text-secondary);
 }
 
 .filters {
   display: flex;
-  gap: 8px;
+  gap: 6px;
 }
 .filters input,
+.filters select,
 .instrument-input {
   font-size: 12px;
-  padding: 6px 8px;
+  padding: 4px 6px;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 0;
   background: var(--page);
   color: var(--text-primary);
 }
 
 .panel-queue {
-  max-height: 720px;
+  height: calc(100svh - 181px);
   overflow-y: auto;
 }
 

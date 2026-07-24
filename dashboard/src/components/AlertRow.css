@@ -1,0 +1,116 @@
+.alert-row-group {
+  border-bottom: 1px solid var(--gridline);
+}
+
+.alert-row {
+  display: grid;
+  grid-template-columns: 84px 62px 168px 68px 1fr 52px 96px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+.alert-row:hover {
+  background: var(--surface-2);
+}
+
+.alert-row-header {
+  position: sticky;
+  top: 0;
+  background: var(--surface-1);
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  cursor: default;
+  border-bottom: 1px solid var(--border);
+  z-index: 1;
+}
+.alert-row-header:hover {
+  background: var(--surface-1);
+}
+
+.alert-row-selected > .alert-row {
+  border-left: 2px solid var(--series-1);
+  padding-left: 6px;
+}
+
+.col-detector,
+.col-account {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col-instrument.alert-instrument-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col-score {
+  text-align: right;
+}
+.col-status {
+  text-align: right;
+}
+.sortable {
+  cursor: pointer;
+}
+.sortable:hover {
+  color: var(--text-secondary);
+}
+.status-open {
+  color: var(--status-critical);
+}
+.status-under_review {
+  color: var(--status-warning);
+}
+.status-escalated {
+  color: var(--status-serious);
+}
+.status-closed {
+  color: var(--status-good);
+}
+
+.alert-row-detail {
+  padding: 6px 8px 10px 8px;
+  background: var(--surface-1);
+  border-top: 1px solid var(--gridline);
+}
+
+/* .alert-evidence / .alert-meta are shared with AlertDetail.tsx (ALERTS'
+   right-hand pane) -- kept here since AlertRow.tsx is guaranteed to be
+   loaded (it's imported from MonitorTab unconditionally), not duplicated
+   into AlertDetail.css. */
+.alert-evidence {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 0 0 6px;
+}
+.alert-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  font-size: 11px;
+  margin: 0 0 8px;
+}
+.alert-meta dt {
+  color: var(--text-muted);
+}
+.alert-meta dd {
+  margin: 0;
+  color: var(--text-secondary);
+  word-break: break-word;
+}

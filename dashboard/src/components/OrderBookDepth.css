@@ -3,20 +3,20 @@
   gap: 16px;
   font-size: 11px;
   color: var(--text-secondary);
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 .legend-swatch {
   display: inline-block;
   width: 8px;
   height: 8px;
-  border-radius: 2px;
+  border-radius: 0;
   margin-right: 4px;
 }
 
 .depth-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 10px;
 }
 
 .ladder-row {
@@ -24,41 +24,47 @@
   grid-template-columns: 44px 1fr 60px;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
-  padding: 2px 0;
+  font-size: 11px;
+  padding: 1px 0;
 }
 .ladder-ask .ladder-row {
   grid-template-columns: 60px 1fr 44px;
 }
 
 .ladder-bar-track {
-  height: 14px;
+  height: 10px;
   background: var(--gridline);
-  border-radius: 2px;
+  border-radius: 0;
   overflow: hidden;
 }
 .ladder-bar {
   height: 100%;
-  border-radius: 2px;
+  border-radius: 0;
 }
 .ladder-bar-bid {
-  background: var(--series-1);
+  background: var(--bid);
   margin-left: auto;
 }
 .ladder-bar-ask {
-  background: var(--series-8);
+  background: var(--ask);
 }
 
 .ladder-price {
   font-weight: 600;
 }
 .ladder-bid .ladder-price {
-  color: var(--series-1);
+  color: var(--bid);
 }
 .ladder-ask .ladder-price {
-  color: var(--series-8);
+  color: var(--ask);
 }
 .ladder-qty {
   color: var(--text-secondary);
   text-align: right;
+}
+
+.ladder-more {
+  color: var(--text-muted);
+  font-size: 10px;
+  padding: 3px 0 0;
 }

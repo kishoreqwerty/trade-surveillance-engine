@@ -3,15 +3,15 @@ import { colorForDetector, severityFor } from "../severity";
 import "./EventTimeline.css";
 
 function formatTime(ns: number): string {
-  return new Date(ns / 1e6).toLocaleTimeString();
+  return new Date(ns / 1e6).toLocaleTimeString(undefined, { hour12: false });
 }
 
 // The "event timeline" deliverable: every currently-loaded alert plotted
 // on a single shared time axis (one row per detector -- small multiples,
 // not a second axis), positioned by window_start_ns. Dot color follows
-// detector identity (fixed categorical slot, matching AlertQueue's chips);
-// dot size/fill follows severity via the same reserved status palette
-// AlertCard uses, so severity never leans on hue alone here either. A
+// detector identity (fixed categorical slot, matching AlertRow's detector
+// column); dot size/fill follows severity via the same reserved status
+// palette AlertRow uses, so severity never leans on hue alone here either. A
 // legend is always present (>=2 series rule) since detector identity is
 // the color channel in play.
 export default function EventTimeline({ alerts }: { alerts: Alert[] }) {

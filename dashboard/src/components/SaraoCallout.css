@@ -1,0 +1,48 @@
+.sarao-callout {
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+}
+.sarao-fired {
+  border-color: var(--status-good);
+}
+.sarao-not-fired {
+  border-color: var(--status-critical);
+}
+
+.sarao-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.sarao-citation {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.sarao-result {
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+.sarao-status-good {
+  color: var(--status-good);
+  font-weight: 600;
+}
+.sarao-status-bad {
+  color: var(--status-critical);
+  font-weight: 600;
+}
+
+.sarao-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  font-size: 11px;
+}
+.sarao-meta dt {
+  color: var(--text-muted);
+}
+.sarao-meta dd {
+  margin: 0;
+  color: var(--text-secondary);
+}

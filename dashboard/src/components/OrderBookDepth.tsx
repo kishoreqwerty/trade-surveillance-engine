@@ -5,7 +5,24 @@ import "./OrderBookDepth.css";
 
 const POLL_INTERVAL_MS = 2000;
 
-function Ladder({ levels, side, maxQty }: { levels: PriceLevel[]; side: "bid" | "ask"; maxQty: number }) {
+// A real depth ladder shows the top of book, not the whole book -- capping
+// here (rather than letting the panel grow to however many price levels
+// happen to be resting) is what keeps this a ladder instead of an
+// unbounded list that pushes everything below it off-screen.
+const VISIBLE_LEVELS = 15;
+
+function Ladder({
+  levels,
+  totalLevelCount,
+  side,
+  maxQty,
+}: {
+  levels: PriceLevel[];
+  totalLevelCount: number;
+  side: "bid" | "ask";
+  maxQty: number;
+}) {
+  const hidden = totalLevelCount - levels.length;
   return (
     <div className={`ladder ladder-${side}`}>
       {levels.length === 0 && <p className="empty-state">no {side}s</p>}
@@ -22,6 +39,7 @@ function Ladder({ levels, side, maxQty }: { levels: PriceLevel[]; side: "bid" | 
           </div>
         );
       })}
+      {hidden > 0 && <p className="ladder-more">+{hidden} more level{hidden === 1 ? "" : "s"}</p>}
     </div>
   );
 }
@@ -31,8 +49,9 @@ function Ladder({ levels, side, maxQty }: { levels: PriceLevel[]; side: "bid" | 
 // -- the standard depth-display convention, one shared quantity scale
 // across both sides (not a dual-axis chart: both bars encode the same
 // measure, just split left/right by side, per the diverging bid/ask
-// convention -- blue/red is this app's diverging pair, per the dataviz
-// skill's palette).
+// convention -- green/red (--bid/--ask) is this app's semantic bid/ask
+// pair, distinct from the categorical --series-* ramp used for detector
+// identity elsewhere).
 export default function OrderBookDepth({ instrumentId }: { instrumentId: string }) {
   const [snapshot, setSnapshot] = useState<DepthSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -64,25 +83,26 @@ export default function OrderBookDepth({ instrumentId }: { instrumentId: string 
 
   if (!instrumentId || error || !snapshot) return null; // LiveTicker above already surfaces the relevant message
 
-  const maxQty = Math.max(
-    0,
-    ...snapshot.bids.map((l) => l.total_qty),
-    ...snapshot.asks.map((l) => l.total_qty),
-  );
+  const visibleBids = snapshot.bids.slice(0, VISIBLE_LEVELS);
+  const visibleAsks = snapshot.asks.slice(0, VISIBLE_LEVELS);
+  // Scale is derived from what's actually rendered, not the full book --
+  // a deep resting level outside the visible top-15 shouldn't compress
+  // every visible bar down to look artificially thin.
+  const maxQty = Math.max(0, ...visibleBids.map((l) => l.total_qty), ...visibleAsks.map((l) => l.total_qty));
 
   return (
     <div className="depth-viz">
       <div className="depth-legend">
         <span>
-          <span className="legend-swatch" style={{ background: "var(--series-1)" }} /> bids
+          <span className="legend-swatch" style={{ background: "var(--bid)" }} /> bids
         </span>
         <span>
-          <span className="legend-swatch" style={{ background: "var(--series-8)" }} /> asks
+          <span className="legend-swatch" style={{ background: "var(--ask)" }} /> asks
         </span>
       </div>
       <div className="depth-columns">
-        <Ladder levels={snapshot.bids} side="bid" maxQty={maxQty} />
-        <Ladder levels={snapshot.asks} side="ask" maxQty={maxQty} />
+        <Ladder levels={visibleBids} totalLevelCount={snapshot.bids.length} side="bid" maxQty={maxQty} />
+        <Ladder levels={visibleAsks} totalLevelCount={snapshot.asks.length} side="ask" maxQty={maxQty} />
       </div>
     </div>
   );

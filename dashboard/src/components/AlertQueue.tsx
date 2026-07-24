@@ -1,5 +1,5 @@
 import type { Alert } from "../types";
-import AlertCard from "./AlertCard";
+import AlertRow, { AlertRowHeader } from "./AlertRow";
 
 interface Props {
   alerts: Alert[];
@@ -14,8 +14,9 @@ export default function AlertQueue({ alerts, onStatusChanged, onSelectInstrument
   }
   return (
     <div>
+      <AlertRowHeader />
       {alerts.map((alert) => (
-        <AlertCard
+        <AlertRow
           key={alert.alert_id}
           alert={alert}
           onStatusChanged={onStatusChanged}

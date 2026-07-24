@@ -1,0 +1,33 @@
+.severity-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.severity-legend .legend-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+}
+
+.severity-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.severity-line {
+  fill: none;
+  stroke-width: 2;
+}
+.severity-axis {
+  stroke: var(--gridline);
+  stroke-width: 1;
+}
+.severity-label {
+  font-size: 9px;
+  fill: var(--text-muted);
+  font-family: var(--mono);
+}

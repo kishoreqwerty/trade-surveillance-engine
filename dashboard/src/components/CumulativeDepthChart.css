@@ -1,0 +1,45 @@
+.depth-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.depth-chart-line {
+  fill: none;
+  stroke-width: 2;
+}
+.depth-chart-bid {
+  stroke: var(--bid);
+}
+.depth-chart-ask {
+  stroke: var(--ask);
+}
+.depth-chart-dot {
+  opacity: 0;
+}
+.depth-chart-dot-bid,
+.depth-chart-dot-ask {
+  fill: currentColor;
+}
+.depth-chart-dot-bid {
+  color: var(--bid);
+}
+.depth-chart-dot-ask {
+  color: var(--ask);
+}
+.depth-chart-dot:hover {
+  opacity: 1;
+}
+.depth-chart-axis {
+  stroke: var(--gridline);
+  stroke-width: 1;
+}
+.depth-chart-mid {
+  stroke: var(--baseline);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.depth-chart-label {
+  font-size: 9px;
+  fill: var(--text-muted);
+  font-family: var(--mono);
+}

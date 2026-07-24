@@ -1,0 +1,35 @@
+/* Small labeled metrics grid shown under a detector's narrative sentence --
+   same color tokens AlertRow.css's .alert-meta already uses (no new
+   colors), just a compact card layout instead of a definition list, since
+   this is meant to read as "supporting numbers," not metadata. */
+.evidence-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 6px 12px;
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--gridline);
+  border-radius: 3px;
+}
+.evidence-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.evidence-metric-label {
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.evidence-metric-value {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}

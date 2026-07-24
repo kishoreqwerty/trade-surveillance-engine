@@ -1,0 +1,50 @@
+.fix-feed-row {
+  display: grid;
+  grid-template-columns: 62px 76px 46px 80px 56px 1fr 100px;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--gridline);
+}
+.fix-feed-header {
+  position: sticky;
+  top: 0;
+  background: var(--surface-1);
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border);
+}
+
+.col-fix-order,
+.col-fix-account {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.col-fix-price,
+.col-fix-qty {
+  text-align: right;
+}
+
+.fix-type-new {
+  color: var(--text-secondary);
+}
+.fix-type-cancel {
+  color: var(--status-warning);
+}
+.fix-type-replace {
+  color: var(--status-warning);
+}
+.fix-type-execution {
+  color: var(--series-1);
+  font-weight: 600;
+}
+
+.fix-side-buy {
+  color: var(--bid);
+}
+.fix-side-sell {
+  color: var(--ask);
+}

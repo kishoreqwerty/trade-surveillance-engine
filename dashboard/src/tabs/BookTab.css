@@ -1,0 +1,61 @@
+.book-grid {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+@media (max-width: 1000px) {
+  .book-grid {
+    grid-template-columns: 1fr;
+  }
+  .book-left-col,
+  .book-right-col {
+    height: auto !important;
+  }
+}
+
+/* Same chrome-above-grid budget as App.css's .panel-queue/.monitor-right-col
+   -- .book-grid sits in the identical DOM position under header+tab nav+
+   KpiStrip. Kept in sync with that measured value, not re-derived. */
+.book-left-col,
+.book-right-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: calc(100svh - 181px);
+  min-height: 0;
+}
+.book-left-col > .panel,
+.book-right-col > .panel {
+  margin-bottom: 0;
+}
+
+.book-instrument-select {
+  width: 100%;
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--page);
+  color: var(--text-primary);
+}
+
+.book-ladder-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.book-chart-panel {
+  flex: none;
+}
+.book-feed-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.book-feed-scroll {
+  overflow-y: auto;
+  flex: 1;
+}

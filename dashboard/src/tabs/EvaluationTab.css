@@ -1,0 +1,47 @@
+.eval-snapshot-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--status-warning);
+  border: 1px solid var(--status-warning);
+  padding: 6px 10px;
+  margin-bottom: 10px;
+}
+.eval-snapshot-badge::before {
+  content: "◷";
+}
+
+/* Chrome above .eval-grid (header + tab nav + KpiStrip + this tab's own
+   snapshot badge), measured via a real DOM boundingClientRect: 198.5px,
+   +22px for .app-shell's bottom padding and a small safety margin --
+   not reused blindly from App.css's 181px, since the badge above this
+   grid is extra height MONITOR/ALERTS/BOOK don't have.
+
+   grid-template-rows is explicit (two equal halves of the container's own
+   fixed height), not auto -- auto rows would size to the tallest panel's
+   natural content and make the whole grid taller than its own height
+   budget. Each panel gets its own overflow-y:auto (not just the grid
+   container): an EARLIER version relied on min-height:0 without a
+   matching overflow on the panel itself, and the 5-detector metrics panel
+   visually spilled ~100px past its own border into the row below instead
+   of scrolling -- caught by checking a real getBoundingClientRect, not by
+   trusting that "the page doesn't scroll" meant nothing was broken. */
+.eval-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 10px;
+  height: calc(100svh - 220px);
+}
+@media (max-width: 1000px) {
+  .eval-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    height: auto;
+  }
+}
+.eval-grid .panel {
+  min-height: 0;
+  overflow-y: auto;
+}

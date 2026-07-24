@@ -1,0 +1,74 @@
+.alerts-grid {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: 10px;
+  align-items: start;
+}
+@media (max-width: 1100px) {
+  .alerts-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Same chrome-above-grid budget as .panel-queue/.monitor-right-col in
+   App.css (identical DOM position: both .alerts-grid and .app-grid sit
+   directly under header+tab nav+KpiStrip) -- kept in sync with that
+   measured value rather than a separately-guessed number. See App.css's
+   comment for how 181 was derived. */
+.alerts-list-panel,
+.alerts-detail-panel {
+  height: calc(100svh - 181px);
+  display: flex;
+  flex-direction: column;
+}
+
+.alerts-list-scroll {
+  overflow-y: auto;
+  flex: 1;
+}
+
+/* Same bracket-button convention as AlertActions.css's [REVIEW]/[CLOSE]
+   controls (background:none, border:none, text-secondary -> series-1 on
+   hover, 0.5 opacity when disabled) -- no new colors, no pill/rounded
+   styling. */
+.alerts-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-top: 1px solid var(--gridline);
+  font-size: 11px;
+  flex: none;
+}
+.alerts-pagination-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.alerts-pagination-nav button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.alerts-pagination-nav button:hover:not(:disabled) {
+  color: var(--series-1);
+}
+.alerts-pagination-nav button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.alerts-pagination-total {
+  color: var(--text-muted);
+}
+
+.alerts-detail-panel .panel-header {
+  flex: none;
+}
+.alert-detail {
+  overflow-y: auto;
+  flex: 1;
+}

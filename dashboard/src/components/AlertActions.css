@@ -1,0 +1,48 @@
+.alert-actions {
+  display: flex;
+  gap: 8px;
+}
+.alert-actions button {
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.alert-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* REVIEW / CLOSE / REOPEN -- bordered/outlined, dark filled background.
+   --gridline (not the near-invisible --border) so the outline actually
+   reads against --surface-1/--surface-2 panels. */
+.alert-actions button.action-secondary {
+  background: var(--surface-2);
+  border: 1px solid var(--gridline);
+  color: var(--text-primary);
+}
+.alert-actions button.action-secondary:hover:not(:disabled) {
+  background: var(--baseline);
+  border-color: var(--series-1);
+  color: var(--series-1);
+}
+
+/* ESCALATE -- solid filled, the same red Critical severity already uses
+   (--status-critical) -- not a new color, just a new surface for an
+   existing token. */
+.alert-actions button.action-critical {
+  background: var(--status-critical);
+  border: 1px solid var(--status-critical);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.alert-actions button.action-critical:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.alert-action-error {
+  color: var(--status-critical);
+  font-size: 11px;
+  margin: 4px 0 0;
+}

@@ -1,4 +1,4 @@
-import type { Alert, AlertStatus, DepthSnapshot } from "./types";
+import type { Alert, AlertStatus, ApiStatus, BookEvent, DepthSnapshot, EvaluationResponse } from "./types";
 
 // No hardcoded/mock data anywhere in this module or any component that
 // calls it -- every function here is a real fetch() against cpp/api/'s
@@ -37,6 +37,35 @@ export async function fetchAlerts(filter: AlertFilter = {}): Promise<Alert[]> {
   return alerts;
 }
 
+export interface AlertPageFilter {
+  detectorName?: string;
+  status?: AlertStatus;
+  offset: number;
+  limit: number;
+}
+
+export interface AlertPage {
+  alerts: Alert[];
+  totalCount: number;
+}
+
+// ALERTS tab's page-footer query -- real server-side offset/limit plus a
+// real total_count (see cpp/db/alert_store.cpp's list_alerts_paginated()),
+// distinct from fetchAlerts() above (which every other tab still uses for
+// the shared "most recent 250" poll). Free-text search stays client-side
+// (see AlertsTab.tsx), so it isn't a param here.
+export async function fetchAlertPage(filter: AlertPageFilter): Promise<AlertPage> {
+  const params = new URLSearchParams();
+  params.set("offset", String(filter.offset));
+  params.set("limit", String(filter.limit));
+  if (filter.detectorName) params.set("detector_name", filter.detectorName);
+  if (filter.status) params.set("status", filter.status);
+  const { alerts, total_count } = await getJson<{ alerts: Alert[]; total_count: number }>(
+    `/api/alerts?${params.toString()}`,
+  );
+  return { alerts, totalCount: total_count };
+}
+
 export async function fetchAlert(alertId: number): Promise<Alert> {
   return getJson<Alert>(`/api/alerts/${alertId}`);
 }
@@ -62,4 +91,19 @@ export async function fetchOrderBookSnapshot(instrumentId: string): Promise<Dept
     throw new Error(`orderbook snapshot -> ${res.status}: ${body.error ?? res.statusText}`);
   }
   return res.json() as Promise<DepthSnapshot>;
+}
+
+export async function fetchStatus(): Promise<ApiStatus> {
+  return getJson<ApiStatus>("/api/status");
+}
+
+export async function fetchBookEvents(instrumentId: string, limit = 50): Promise<BookEvent[]> {
+  const { events } = await getJson<{ events: BookEvent[] }>(
+    `/api/orderbook/${encodeURIComponent(instrumentId)}/events?limit=${limit}`,
+  );
+  return events;
+}
+
+export async function fetchEvaluation(): Promise<EvaluationResponse> {
+  return getJson<EvaluationResponse>("/api/evaluation");
 }
