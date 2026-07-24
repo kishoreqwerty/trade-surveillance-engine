@@ -4,6 +4,46 @@ A post-trade market abuse detection system that ingests live FIX 4.2 order and e
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    A["FIX 4.2 Order/Execution Flow<br/>(QuickFIX)"] --> B["SPSC Lock-Free<br/>Ring Buffer"]
+    B --> C["Kafka<br/>(librdkafka)<br/>durable, replayable"]
+    B --> D["Order Book<br/>(price-time priority,<br/>per instrument)"]
+
+    D --> E1["WashTradeDetector"]
+    D --> E2["SpoofingLayeringDetector"]
+    D --> E3["MarkingTheCloseDetector"]
+    D --> E4["FrontRunningDetector"]
+    D --> E5["StatisticalBaselineDetector"]
+    D -.async.-> F["MlAnomalyDetector"]
+
+    F -.-> G["ml_service<br/>(Python FastAPI +<br/>Isolation Forest)"]
+    G -.-> F
+
+    E1 --> H["TimescaleDB<br/>(libpqxx)"]
+    E2 --> H
+    E3 --> H
+    E4 --> H
+    E5 --> H
+    F --> H
+
+    H --> I["Crow REST API"]
+    I --> J["React Dashboard<br/>(MONITOR / ALERTS / BOOK / EVALUATION)"]
+
+    C -.replay.-> K["Evaluation Harness<br/>(precision/recall/F1)"]
+    K -.-> D
+
+    style A fill:#1a1a2e,stroke:#4a4a6a,color:#fff
+    style B fill:#16213e,stroke:#4a4a6a,color:#fff
+    style C fill:#16213e,stroke:#4a4a6a,color:#fff
+    style D fill:#0f3460,stroke:#4a4a6a,color:#fff
+    style G fill:#533483,stroke:#4a4a6a,color:#fff
+    style H fill:#16213e,stroke:#4a4a6a,color:#fff
+    style I fill:#0f3460,stroke:#4a4a6a,color:#fff
+    style J fill:#1a1a2e,stroke:#4a4a6a,color:#fff
+    style K fill:#2d2d44,stroke:#4a4a6a,color:#fff
+```
+
 ```
 FIX 4.2 flow (QuickFIX)
       │
