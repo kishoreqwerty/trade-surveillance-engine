@@ -1,6 +1,6 @@
 # FIX-Native Trade Surveillance Engine — Architecture Spec
 
-Companion to `P2_FIX_Native_Trade_Surveillance_Engine_HLD.md` (decisions/rationale) and `P2_trade_surveillance_engine_build_guide.md` (phased build steps). This doc is the concrete technical reference: repo layout, module responsibilities, interfaces, and data flow.
+Companion to `P2_FIX_Native_Trade_Surveillance_Engine_HLD.md` (decisions/rationale). This doc is the concrete technical reference: repo layout, module responsibilities, interfaces, and data flow.
 
 ---
 
@@ -8,9 +8,7 @@ Companion to `P2_FIX_Native_Trade_Surveillance_Engine_HLD.md` (decisions/rationa
 
 ```
 trade-surveillance-engine/
-├── CLAUDE.md
 ├── P2_FIX_Native_Trade_Surveillance_Engine_HLD.md
-├── P2_trade_surveillance_engine_build_guide.md
 ├── ARCHITECTURE.md                 (this file)
 ├── CMakeLists.txt
 ├── docker-compose.yml              (TimescaleDB + Kafka)

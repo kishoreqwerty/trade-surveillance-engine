@@ -14,9 +14,26 @@ void MlAnomalyDetector::handle_order(const Order& order, int64_t book_snapshot_s
     const std::string key = order.account_id + "|" + order.instrument_id;
     WindowStats& stats = stats_by_key_[key];
 
-    if (stats.window_start_ns == 0 || order.timestamp_ns - stats.window_start_ns > config_.window_duration_ns) {
+    if (stats.window_start_ns == 0 || order.timestamp_ns < stats.window_start_ns ||
+        order.timestamp_ns - stats.window_start_ns > config_.window_duration_ns) {
         // Fresh tumbling window -- the previous window's stats are simply
-        // superseded, not carried forward.
+        // superseded, not carried forward. The `order.timestamp_ns <
+        // stats.window_start_ns` arm exists alongside the forward-duration
+        // check, not just the latter alone: cpp/api/main.cpp's demo feed
+        // loop reuses the same fixed session_start_ns anchor for every
+        // synthetic session, so live event timestamps genuinely regress
+        // backward at every session boundary (see
+        // cpp/pipeline/README.md's investigation section, and
+        // spoofing_layering_detector.cpp's AmbientTracker, which had the
+        // identical bug shape). Without this arm, a backward jump makes
+        // `order.timestamp_ns - stats.window_start_ns` negative -- never
+        // `> window_duration_ns` -- so the window silently never resets and
+        // order_count/total_qty/orders_per_second accumulate across
+        // unboundedly many session loops instead of one real 60s window,
+        // systematically inflating MlAnomalyDetector's live anomaly scores
+        // (measured: cpp/harness/main_diag_session_loop.cpp, a session-loop
+        // reproduction at demo scale, showed the fraction of scored windows
+        // >= 0.7 rise 47x, 0.1% -> 4.7%, purely from this effect).
         stats = WindowStats{};
         stats.window_start_ns = order.timestamp_ns;
     }

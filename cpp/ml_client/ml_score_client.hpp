@@ -44,6 +44,11 @@ public:
     // window).
     std::optional<ScoringResult> score(const ScoringRequest& request);
 
+    // Hits ml_service's real GET /health. Same timeout budget as score()
+    // -- this is meant for a low-frequency status poll (api/'s KPI strip),
+    // never the hot path.
+    bool health_check();
+
 private:
     std::unique_ptr<httplib::Client> client_;
 };

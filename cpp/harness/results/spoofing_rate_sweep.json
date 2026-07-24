@@ -1,0 +1,94 @@
+{
+  "generated_at_unix_ns": 1784787160076270000,
+  "detector": "SpoofingLayeringDetector",
+  "points": [
+    {
+      "rate_per_sec": 3.0,
+      "threshold": 0.5,
+      "tp": 15,
+      "fp": 3,
+      "precision": 0.833333,
+      "recall": 0.2
+    },
+    {
+      "rate_per_sec": 5.0,
+      "threshold": 0.5,
+      "tp": 17,
+      "fp": 6,
+      "precision": 0.73913,
+      "recall": 0.226667
+    },
+    {
+      "rate_per_sec": 7.0,
+      "threshold": 0.5,
+      "tp": 19,
+      "fp": 6,
+      "precision": 0.76,
+      "recall": 0.253333
+    },
+    {
+      "rate_per_sec": 9.0,
+      "threshold": 0.5,
+      "tp": 13,
+      "fp": 12,
+      "precision": 0.52,
+      "recall": 0.173333
+    },
+    {
+      "rate_per_sec": 12.0,
+      "threshold": 0.5,
+      "tp": 8,
+      "fp": 15,
+      "precision": 0.347826,
+      "recall": 0.106667
+    },
+    {
+      "rate_per_sec": 16.0,
+      "threshold": 0.5,
+      "tp": 5,
+      "fp": 19,
+      "precision": 0.208333,
+      "recall": 0.066667
+    },
+    {
+      "rate_per_sec": 20.0,
+      "threshold": 0.5,
+      "tp": 4,
+      "fp": 22,
+      "precision": 0.153846,
+      "recall": 0.053333
+    },
+    {
+      "rate_per_sec": 25.0,
+      "threshold": 0.5,
+      "tp": 4,
+      "fp": 30,
+      "precision": 0.117647,
+      "recall": 0.053333
+    },
+    {
+      "rate_per_sec": 75.0,
+      "threshold": 0.5,
+      "tp": 2,
+      "fp": 75,
+      "precision": 0.025974,
+      "recall": 0.026667
+    },
+    {
+      "rate_per_sec": 150.0,
+      "threshold": 0.5,
+      "tp": 3,
+      "fp": 150,
+      "precision": 0.019608,
+      "recall": 0.04
+    },
+    {
+      "rate_per_sec": 250.35,
+      "threshold": 0.5,
+      "tp": 4,
+      "fp": 252,
+      "precision": 0.015625,
+      "recall": 0.053333
+    }
+  ]
+}

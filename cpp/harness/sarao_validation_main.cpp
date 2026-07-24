@@ -9,24 +9,61 @@
 // does" -- this program does not tune anything based on the result.
 #include <chrono>
 #include <cstdio>
+#include <fstream>
 #include <string>
 
 #include "abuse/sarao_case.hpp"
+#include "json_output.hpp"
 #include "replay_runner.hpp"
 #include "simulator.hpp"
 
 namespace {
 
 constexpr const char* kBrokers = "localhost:9092";
+constexpr double kAlertThreshold = 0.6;  // SpoofingLayeringDetector's own default -- see its config
 
 std::string unique_topic() {
     auto now = std::chrono::system_clock::now().time_since_epoch().count();
     return "tse-sarao-validation-" + std::to_string(now);
 }
 
+// Must match sarao_case.cpp's kSpooferAccount exactly. Not exposed via
+// sarao_case.hpp (the builder's internal account naming isn't part of its
+// public contract), so duplicated here deliberately rather than reached
+// into -- this file is already wholly Sarao-specific.
+constexpr const char* kSpooferAccount = "SARAO";
+
+// SpoofingLayeringDetector only ever fires from handle_cancel() (see
+// ground_truth.hpp's own comment on its universe), so the real
+// "opportunities to fire" denominator is the actual count of cancels the
+// spoofer's own account generates -- not every cancel in the scenario.
+// sarao_case.cpp constructs two structurally different cancel groups: the
+// SARAO account's layering-order cancels (the actual pattern under test,
+// 5 cycles x 5 layers = 25) and a separate MKT-BIDS account's bid-retreat
+// cancels (the simulated market's own reaction to the visible imbalance,
+// 5 of them -- not spoofing activity, and not something
+// SpoofingLayeringDetector has any reason to fire on). Counting all
+// cancels indiscriminately here first (an earlier version of this
+// function) silently produced 30, not 25 -- caught by comparing against
+// this scenario's own documented "5 levels x 5 cycles" construction before
+// shipping a wrong denominator into the JSON snapshot.
+int count_cancels(const tse::simulator::SimulationOutput& simulation) {
+    int count = 0;
+    for (const auto& order : simulation.orders) {
+        if (order.status == tse::simulator::OrderStatus::kCancelled && order.account_id == kSpooferAccount) ++count;
+    }
+    return count;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    std::string json_path;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--json" && i + 1 < argc) json_path = argv[++i];
+    }
+
     tse::simulator::SaraoCaseOutput sarao = tse::simulator::build_sarao_case();
 
     tse::simulator::SimulationOutput simulation;
@@ -71,14 +108,48 @@ int main() {
         std::printf("]\n    evidence=%s\n", alert.evidence.c_str());
     }
 
+    int total_cancels = count_cancels(simulation);
+
     std::printf("\n--- Result ---\n");
     if (spoofing_alerts > 0) {
         std::printf(
-            "SpoofingLayeringDetector FIRED %d time(s) against the Sarao layering pattern, "
-            "max score=%.4f (alert_threshold default=0.6)\n",
-            spoofing_alerts, max_score);
+            "SpoofingLayeringDetector FIRED %d time(s) against the Sarao layering pattern (of %d cancel "
+            "opportunities), max score=%.4f (alert_threshold default=%.1f)\n",
+            spoofing_alerts, total_cancels, max_score, kAlertThreshold);
     } else {
         std::printf("SpoofingLayeringDetector DID NOT FIRE against the Sarao layering pattern as constructed.\n");
+    }
+
+    if (!json_path.empty()) {
+        using tse::harness::json_bool;
+        using tse::harness::json_number;
+        using tse::harness::JsonWriter;
+
+        JsonWriter replay_integrity;
+        replay_integrity.field("orders", json_number(static_cast<int64_t>(simulation.orders.size())));
+        replay_integrity.field("executions", json_number(static_cast<int64_t>(simulation.executions.size())));
+        replay_integrity.field("published", json_number(static_cast<int64_t>(result.events_total)));
+        replay_integrity.field("replayed", json_number(static_cast<int64_t>(result.events_replayed_from_kafka)));
+        replay_integrity.field("processed", json_number(static_cast<int64_t>(result.events_processed)));
+        replay_integrity.field("skipped_inconsistent", json_number(static_cast<int64_t>(result.events_skipped_inconsistent)));
+        replay_integrity.field("dropped", json_number(static_cast<int64_t>(result.ring_buffer_dropped)));
+
+        JsonWriter root;
+        root.field("generated_at_unix_ns", json_number(tse::harness::now_epoch_ns()));
+        root.field("fired_count", json_number(static_cast<int64_t>(spoofing_alerts)));
+        root.field("total_cancel_opportunities", json_number(static_cast<int64_t>(total_cancels)));
+        root.field("max_score", json_number(max_score));
+        root.field("alert_threshold", json_number(kAlertThreshold));
+        root.field("fired_cleanly", json_bool(spoofing_alerts > 0));
+        root.field("replay_integrity", replay_integrity.str());
+
+        std::ofstream out(json_path);
+        if (!out) {
+            std::fprintf(stderr, "FATAL: could not open --json output path %s for writing\n", json_path.c_str());
+            return 1;
+        }
+        out << root.str();
+        std::printf("\nWrote JSON snapshot to %s\n", json_path.c_str());
     }
 
     std::printf("\n=== Done ===\n");

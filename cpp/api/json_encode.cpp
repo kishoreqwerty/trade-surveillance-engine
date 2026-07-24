@@ -40,6 +40,12 @@ crow::json::wvalue encode_alerts(const std::vector<tse::db::StoredAlert>& alerts
     return out;
 }
 
+crow::json::wvalue encode_alerts(const std::vector<tse::db::StoredAlert>& alerts, int64_t total_count) {
+    crow::json::wvalue out = encode_alerts(alerts);
+    out["total_count"] = total_count;
+    return out;
+}
+
 namespace {
 crow::json::wvalue encode_price_level(const tse::orderbook::PriceLevel& level) {
     crow::json::wvalue out;
@@ -73,6 +79,26 @@ crow::json::wvalue encode_depth_snapshot(const tse::orderbook::DepthSnapshot& sn
     out["last_event_timestamp_ns"] = snapshot.last_event_timestamp_ns;
     out["bids"] = crow::json::wvalue(encode_price_levels(snapshot.bids));
     out["asks"] = crow::json::wvalue(encode_price_levels(snapshot.asks));
+    return out;
+}
+
+crow::json::wvalue encode_book_events(const std::vector<tse::api::BookEvent>& events) {
+    std::vector<crow::json::wvalue> items;
+    items.reserve(events.size());
+    for (const auto& event : events) {
+        crow::json::wvalue item;
+        item["timestamp_ns"] = event.timestamp_ns;
+        item["instrument_id"] = event.instrument_id;
+        item["msg_type"] = event.msg_type;
+        item["side"] = event.side;
+        item["price"] = event.price;
+        item["qty"] = event.qty;
+        item["order_id"] = event.order_id;
+        item["account_id"] = event.account_id;
+        items.push_back(std::move(item));
+    }
+    crow::json::wvalue out;
+    out["events"] = crow::json::wvalue(std::move(items));
     return out;
 }
 

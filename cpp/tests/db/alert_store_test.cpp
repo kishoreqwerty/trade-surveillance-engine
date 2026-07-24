@@ -207,10 +207,51 @@ TEST(AlertStore, ListRecentAlertsReturnsMostRecentFirstUpToLimit) {
 
     std::vector<StoredAlert> recent = store->list_recent_alerts(3);
     ASSERT_EQ(recent.size(), 3u);
-    // Most recent (largest window_start_ns) first.
+    // Most recently inserted first. window_start_ns happens to also be
+    // increasing with insertion order in this test's data, but that's
+    // incidental -- see ListRecentAlertsOrdersByRealInsertionTimeNotSyntheticEventTime
+    // below for the test that actually pins down which field ordering
+    // depends on.
     EXPECT_EQ(recent[0].alert.window_start_ns, 5'000'000'000LL);
     EXPECT_EQ(recent[1].alert.window_start_ns, 4'000'000'000LL);
     EXPECT_EQ(recent[2].alert.window_start_ns, 3'000'000'000LL);
+}
+
+// cpp/api/main.cpp's demo feed loop reuses the same fixed timestamp anchor
+// for every synthetic session, so window_start_ns genuinely regresses
+// backward at every session boundary (see cpp/pipeline/README.md) -- the
+// same root cause already found in SpoofingLayeringDetector's
+// AmbientTracker and MlAnomalyDetector's WindowStats, this time in the
+// query layer. An alert inserted moments ago can carry an earlier
+// window_start_ns than one inserted hours before it, so "most recent" must
+// mean real insertion order (alert_id), not window_start_ns.
+TEST(AlertStore, ListRecentAlertsOrdersByRealInsertionTimeNotSyntheticEventTime) {
+    auto store = connect_or_skip();
+    if (!store) GTEST_SKIP() << "TimescaleDB not reachable at 127.0.0.1:5432 -- run `docker compose up -d timescaledb` first.";
+
+    // Inserted in this real order, but with window_start_ns deliberately
+    // NOT monotonic with it -- exactly the session-boundary-regression
+    // shape: the alert inserted first carries the largest window_start_ns,
+    // and the one inserted last carries a middling one.
+    Alert first_inserted = make_alert();
+    first_inserted.window_start_ns = 5'000'000'000LL;
+    int64_t first_id = store->insert_alert(first_inserted);
+
+    Alert second_inserted = make_alert();
+    second_inserted.window_start_ns = 1'000'000'000LL;
+    int64_t second_id = store->insert_alert(second_inserted);
+
+    Alert third_inserted = make_alert();
+    third_inserted.window_start_ns = 3'000'000'000LL;
+    int64_t third_id = store->insert_alert(third_inserted);
+
+    std::vector<StoredAlert> recent = store->list_recent_alerts(3);
+    ASSERT_EQ(recent.size(), 3u);
+    // Real insertion order, most recent first: third, second, first --
+    // regardless of each one's (scrambled) window_start_ns.
+    EXPECT_EQ(recent[0].alert_id, third_id);
+    EXPECT_EQ(recent[1].alert_id, second_id);
+    EXPECT_EQ(recent[2].alert_id, first_id);
 }
 
 TEST(AlertStore, UpdateAlertStatusChangesStatusAndOnlyThatAlert) {

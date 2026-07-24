@@ -1,6 +1,7 @@
 #include "spoofing_layering_detector.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace tse::detectors {
 
@@ -32,14 +33,32 @@ void SpoofingLayeringDetector::update_ambient(const OrderBook& book, const std::
         if (tracker.last_best_price.has_value() && price.has_value() && *price != *tracker.last_best_price) {
             tracker.recent_move_timestamps.push_back(event_ts);
         }
-        while (!tracker.recent_move_timestamps.empty() &&
-               event_ts - tracker.recent_move_timestamps.front() > config_.density_window_ns) {
-            tracker.recent_move_timestamps.pop_front();
-        }
-        while (!tracker.recent_concurrent_samples.empty() &&
-               event_ts - tracker.recent_concurrent_samples.front().timestamp_ns > config_.density_window_ns) {
-            tracker.recent_concurrent_samples.pop_front();
-        }
+        // Symmetric, position-independent pruning (std::llabs + a full
+        // scan), not a front-only trim -- a front-only trim assumes
+        // event_ts is monotonically non-decreasing across calls, which
+        // doesn't hold against the live demo server: main.cpp's feeder
+        // loop reuses the same fixed session_start_ns anchor for every
+        // session (by design, to keep this detector's own close-time-
+        // adjacent siblings' config valid across loops), so the live
+        // event_ts stream genuinely regresses backward at every session
+        // boundary. Under the old front-only trim, a regressed event_ts
+        // could leave older entries stranded behind newer ones in the
+        // deque, where a front-only pop can never reach them again --
+        // unbounded growth over the life of a long-running process. See
+        // cpp/pipeline/README.md's "Alert-persistence stall investigation"
+        // for the full writeup; this mirrors FrontRunningDetector's own
+        // already-robust recent_by_key_ prune (front_running_detector.cpp),
+        // which never had this bug.
+        tracker.recent_move_timestamps.erase(
+            std::remove_if(tracker.recent_move_timestamps.begin(), tracker.recent_move_timestamps.end(),
+                            [&](int64_t ts) { return std::llabs(event_ts - ts) > config_.density_window_ns; }),
+            tracker.recent_move_timestamps.end());
+        tracker.recent_concurrent_samples.erase(
+            std::remove_if(tracker.recent_concurrent_samples.begin(), tracker.recent_concurrent_samples.end(),
+                            [&](const ConcurrentSample& s) {
+                                return std::llabs(event_ts - s.timestamp_ns) > config_.density_window_ns;
+                            }),
+            tracker.recent_concurrent_samples.end());
         if (price.has_value()) tracker.last_best_price = price;
     }
 }

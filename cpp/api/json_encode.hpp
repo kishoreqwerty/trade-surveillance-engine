@@ -5,6 +5,7 @@
 #include <crow/json.h>
 
 #include "depth_snapshot.hpp"
+#include "live_book_registry.hpp"
 #include "stored_alert.hpp"
 
 namespace tse::api {
@@ -17,6 +18,12 @@ namespace tse::api {
 // avoiding a dependency.
 crow::json::wvalue encode_alert(const tse::db::StoredAlert& stored);
 crow::json::wvalue encode_alerts(const std::vector<tse::db::StoredAlert>& alerts);
+// Same shape as encode_alerts() plus a real "total_count" field -- used by
+// /api/alerts's paginated response, where a page footer needs the true
+// total matching the active filter, not just how many rows this one page
+// carries.
+crow::json::wvalue encode_alerts(const std::vector<tse::db::StoredAlert>& alerts, int64_t total_count);
 crow::json::wvalue encode_depth_snapshot(const tse::orderbook::DepthSnapshot& snapshot);
+crow::json::wvalue encode_book_events(const std::vector<tse::api::BookEvent>& events);
 
 }  // namespace tse::api

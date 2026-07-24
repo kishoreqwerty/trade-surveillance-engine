@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -17,6 +18,9 @@
 #include "live_consumer.hpp"
 #include "live_pipeline.hpp"
 #include "marking_the_close_detector.hpp"
+#include "ml_anomaly_detector.hpp"
+#include "ml_score_client.hpp"
+#include "ml_scoring_worker.hpp"
 #include "spoofing_layering_detector.hpp"
 #include "spsc_ring_buffer.hpp"
 #include "statistical_baseline_detector.hpp"
@@ -136,7 +140,8 @@ std::size_t ring_buffer_capacity_for(std::size_t n) {
 }  // namespace
 
 ReplayResult replay_through_kafka(const tse::simulator::SimulationOutput& simulation, const std::string& brokers,
-                                   const std::string& topic, int publish_timeout_ms, int poll_timeout_ms) {
+                                   const std::string& topic, int publish_timeout_ms, int poll_timeout_ms,
+                                   const MlEvalConfig* ml_eval) {
     std::vector<tse::ingestion::IngestionEvent> events = to_ingestion_events(simulation);
 
     {
@@ -156,14 +161,44 @@ ReplayResult replay_through_kafka(const tse::simulator::SimulationOutput& simula
 
     tse::detectors::AccountRegistry accounts;
     for (const auto& account : simulation.accounts) accounts.add(to_entity(account));
-    tse::pipeline::LivePipeline pipeline(make_five_detectors(simulation), std::move(accounts));
+
+    tse::pipeline::CollectingAlertSink alert_sink;
+
+    // Constructed before the pipeline/detectors below since MlAnomalyDetector
+    // (when ml_eval is set) holds a raw pointer to it -- see MlEvalConfig's
+    // header comment for the health-check-before-replay and
+    // alert_threshold=0.0 reasoning.
+    std::optional<tse::ml_client::MlScoringWorker> ml_worker;
+    if (ml_eval != nullptr) {
+        tse::ml_client::MlScoreClient client(ml_eval->client);
+        if (!client.health_check()) {
+            throw std::runtime_error("replay_through_kafka: ml_service health check failed at " +
+                                      ml_eval->client.base_url +
+                                      " -- start ml_service before running an ML-inclusive evaluation");
+        }
+        tse::ml_client::MlScoringWorkerConfig worker_config;
+        worker_config.alert_threshold = 0.0;
+        worker_config.queue_capacity = ring_buffer_capacity_for(events.size());
+        ml_worker.emplace(std::move(client), &alert_sink, worker_config);
+    }
+
+    std::vector<std::unique_ptr<tse::detectors::IDetector>> detectors = make_five_detectors(simulation);
+    if (ml_worker.has_value()) {
+        detectors.push_back(std::make_unique<tse::ml_client::MlAnomalyDetector>(&ml_worker.value()));
+    }
+    tse::pipeline::LivePipeline pipeline(std::move(detectors), std::move(accounts));
 
     tse::ingestion::SpscRingBuffer<tse::ingestion::IngestionEvent> queue(ring_buffer_capacity_for(events.size()));
-    tse::pipeline::CollectingAlertSink alert_sink;
     tse::pipeline::LiveConsumer consumer(queue, pipeline, &alert_sink);
 
     std::atomic<bool> producer_done{false};
     std::thread consumer_thread([&] { consumer.run(producer_done); });
+
+    std::atomic<bool> ml_stop{false};
+    std::optional<std::thread> ml_worker_thread;
+    if (ml_worker.has_value()) {
+        ml_worker_thread.emplace([&] { ml_worker->run(ml_stop); });
+    }
 
     tse::ingestion::KafkaReplayConsumer replay_consumer(brokers, topic);
     replay_consumer.seek_to_beginning();
@@ -182,6 +217,23 @@ ReplayResult replay_through_kafka(const tse::simulator::SimulationOutput& simula
 
     producer_done.store(true, std::memory_order_release);
     consumer_thread.join();
+
+    // Only safe to signal the ML worker to stop *after* the consumer thread
+    // -- the only caller of MlAnomalyDetector::evaluate()/submit() -- has
+    // fully finished; run()'s drain contract (ml_scoring_worker.hpp) then
+    // guarantees every request submitted before this point is fully scored,
+    // with any resulting Alert already in alert_sink, before join() returns.
+    // Both threads are joined before any of the throwing checks below run,
+    // so no std::thread is ever destroyed while still joinable.
+    if (ml_worker_thread.has_value()) {
+        ml_stop.store(true, std::memory_order_release);
+        ml_worker_thread->join();
+        if (ml_worker->requests_dropped() != 0) {
+            throw std::runtime_error("replay_through_kafka: ML scoring queue dropped " +
+                                      std::to_string(ml_worker->requests_dropped()) +
+                                      " request(s) under backpressure -- queue_capacity too small for this replay");
+        }
+    }
 
     if (replayed != events.size()) {
         throw std::runtime_error("replay_through_kafka: only replayed " + std::to_string(replayed) + "/" +

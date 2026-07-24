@@ -189,9 +189,11 @@ std::vector<StoredAlert> AlertStore::query_alerts_by_time_range(int64_t window_s
 std::vector<StoredAlert> AlertStore::query_alerts_by_account(const std::string& account_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
+    // ORDER BY alert_id, not window_start_ns -- see list_recent_alerts's
+    // comment for why the synthetic event clock isn't a safe ordering key.
     pqxx::result rows = txn.exec_params(std::string("SELECT ") + kAlertColumns +
                                              " FROM alerts WHERE account_ids @> ARRAY[$1]::text[] "
-                                             "ORDER BY window_start_ns",
+                                             "ORDER BY alert_id",
                                          account_id);
     txn.commit();
     return rows_to_stored_alerts(rows);
@@ -200,8 +202,9 @@ std::vector<StoredAlert> AlertStore::query_alerts_by_account(const std::string& 
 std::vector<StoredAlert> AlertStore::query_alerts_by_detector(const std::string& detector_name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
+    // ORDER BY alert_id -- see list_recent_alerts's comment.
     pqxx::result rows = txn.exec_params(
-        std::string("SELECT ") + kAlertColumns + " FROM alerts WHERE detector_name = $1 ORDER BY window_start_ns",
+        std::string("SELECT ") + kAlertColumns + " FROM alerts WHERE detector_name = $1 ORDER BY alert_id",
         detector_name);
     txn.commit();
     return rows_to_stored_alerts(rows);
@@ -210,10 +213,48 @@ std::vector<StoredAlert> AlertStore::query_alerts_by_detector(const std::string&
 std::vector<StoredAlert> AlertStore::list_recent_alerts(int limit) const {
     std::lock_guard<std::mutex> lock(mutex_);
     pqxx::work txn(*conn_);
+    // ORDER BY alert_id DESC, not window_start_ns DESC. window_start_ns is
+    // the synthetic event timestamp, and cpp/api/main.cpp's demo feed loop
+    // reuses one fixed timestamp anchor per session, so it genuinely
+    // regresses backward at every session boundary -- the same root cause
+    // already found in SpoofingLayeringDetector's AmbientTracker and
+    // MlAnomalyDetector's WindowStats (see cpp/pipeline/README.md), this
+    // time in the query layer: "most recent by window_start_ns" is not the
+    // same set as "most recently inserted," and an alert inserted moments
+    // ago can rank behind alerts inserted hours ago if its synthetic
+    // timestamp happens to land in an already-passed band. alert_id
+    // (BIGSERIAL, assigned by Postgres at INSERT time) is the one field
+    // that actually tracks real insertion order.
     pqxx::result rows = txn.exec_params(
-        std::string("SELECT ") + kAlertColumns + " FROM alerts ORDER BY window_start_ns DESC LIMIT $1", limit);
+        std::string("SELECT ") + kAlertColumns + " FROM alerts ORDER BY alert_id DESC LIMIT $1", limit);
     txn.commit();
     return rows_to_stored_alerts(rows);
+}
+
+PaginatedAlerts AlertStore::list_alerts_paginated(std::optional<std::string> detector_name,
+                                                    std::optional<std::string> status, int limit, int offset) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pqxx::work txn(*conn_);
+    // ($1::text IS NULL OR detector_name = $1) rather than dynamically
+    // building the WHERE clause per filter combination: libpqxx 7.x binds
+    // std::optional<std::string> as SQL NULL for nullopt directly, so one
+    // static query text covers all four filter combinations (neither,
+    // either, or both) without string-building SQL by hand.
+    pqxx::result rows = txn.exec_params(
+        std::string("SELECT ") + kAlertColumns +
+            " FROM alerts WHERE ($1::text IS NULL OR detector_name = $1) AND ($2::text IS NULL OR status = $2) "
+            "ORDER BY alert_id DESC LIMIT $3 OFFSET $4",
+        detector_name, status, limit, offset);
+    pqxx::row count_row = txn.exec_params1(
+        "SELECT count(*) FROM alerts WHERE ($1::text IS NULL OR detector_name = $1) AND "
+        "($2::text IS NULL OR status = $2)",
+        detector_name, status);
+    txn.commit();
+
+    PaginatedAlerts result;
+    result.alerts = rows_to_stored_alerts(rows);
+    result.total_count = count_row[0].as<int64_t>();
+    return result;
 }
 
 std::optional<StoredAlert> AlertStore::get_alert(int64_t alert_id) const {
@@ -245,6 +286,18 @@ void AlertStore::truncate_all() {
     pqxx::work txn(*conn_);
     txn.exec("TRUNCATE orders, trades, alerts");
     txn.commit();
+}
+
+bool AlertStore::is_connected() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    try {
+        pqxx::work txn(*conn_);
+        txn.exec("SELECT 1");
+        txn.commit();
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 }  // namespace tse::db

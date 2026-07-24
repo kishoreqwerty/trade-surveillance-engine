@@ -100,4 +100,53 @@ enum class UniverseKind { kNewOrder, kCancelOrder, kExecution };
 UniverseKind detector_universe_kind(const std::string& detector_name);
 const DetectorUniverse& select_universe(const Universes& universes, UniverseKind kind);
 
+// MlAnomalyDetector's evidence is a rolling (account_id, instrument_id)
+// window statistic, not a claim about any specific order/execution -- its
+// Alerts carry no order_ids at all (see ml_scoring_worker.cpp's
+// process_one(), which only sets account_ids/instrument_id/window bounds),
+// so compute_confusion_matrix's order-id intersection can't score it.
+// This is the detector's native granularity instead: built once from
+// SimulationOutput, keyed by "account_id|instrument_id", holding every
+// non-baseline order timestamp for that key (MlAnomalyDetector only ever
+// derives its features from Order events -- see ml_anomaly_detector.cpp's
+// handle_order() -- so execution timestamps are deliberately not
+// included here).
+struct MlAnomalyGroundTruth {
+    std::unordered_map<std::string, std::vector<int64_t>> abuse_order_timestamps_by_key;
+};
+
+MlAnomalyGroundTruth build_ml_anomaly_ground_truth(const tse::simulator::SimulationOutput& simulation);
+
+// True if `alert`'s scored window genuinely overlapped injected abuse
+// activity for the same (account, instrument) key. MlAnomalyDetector's
+// Alert only carries a single instant (window_start_ns == window_end_ns ==
+// the triggering order's own timestamp -- see ml_scoring_worker.cpp), not
+// the tumbling window's true start, because ScoringRequest never threads
+// that through. This reconstructs a safe over-approximation of the real
+// window instead: [triggering_ts - window_duration_ns, triggering_ts] is
+// guaranteed to contain the true window (a fresh tumbling window only ever
+// resets once the gap from its start exceeds window_duration_ns -- see
+// MlAnomalyDetector::handle_order()), so this can only ever call a window
+// positive that a tighter reconstruction might have called negative, never
+// the other way around.
+bool ml_anomaly_window_is_positive(const MlAnomalyGroundTruth& ground_truth, const tse::detectors::Alert& alert,
+                                    int64_t window_duration_ns);
+
+// Same tp/fp/fn/tn shape as ConfusionMatrix, but the "universe" here is
+// implicit: every Alert with detector_name == "MlAnomalyDetector" already
+// represents one scored window (not an id needing a lookup), so there's no
+// separate universe_ids/positive_ids pair to pass in -- see
+// replay_runner.hpp's MlEvalConfig for why this only works when the
+// replay's MlScoringWorker was configured with alert_threshold == 0.0
+// (every scored window becomes an Alert here, not just ones that already
+// cleared some earlier gate) -- without that, this would silently undercount
+// FN/TN for any candidate threshold below whatever gate was applied first.
+ConfusionMatrix compute_ml_anomaly_confusion_matrix(const std::vector<tse::detectors::Alert>& alerts,
+                                                      double score_threshold, const MlAnomalyGroundTruth& ground_truth,
+                                                      int64_t window_duration_ns);
+
+std::vector<SweepPoint> ml_anomaly_threshold_sweep(const std::vector<tse::detectors::Alert>& alerts,
+                                                     const MlAnomalyGroundTruth& ground_truth,
+                                                     int64_t window_duration_ns, const std::vector<double>& thresholds);
+
 }  // namespace tse::harness

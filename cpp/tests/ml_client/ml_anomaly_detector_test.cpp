@@ -227,6 +227,78 @@ TEST(MlAnomalyDetector, DoesNotSubmitBeforeMinimumOrdersReached) {
     EXPECT_EQ(request_count.load(), 0);
 }
 
+// cpp/api/main.cpp's demo feed loop reuses the same fixed session_start_ns
+// anchor for every synthetic session, so live event timestamps genuinely
+// regress backward at every session boundary (see cpp/pipeline/README.md's
+// investigation section). A tumbling window must start fresh when that
+// happens, not keep accumulating into the window that was open before the
+// regression -- the same bug shape SpoofingLayeringDetector's
+// AmbientTracker had (front-only pruning assuming monotonic timestamps).
+TEST(MlAnomalyDetector, WindowResetsOnBackwardTimestampRegressionAcrossASessionBoundary) {
+    std::mutex mutex;
+    std::vector<std::string> captured_bodies;
+    TestHttpServer server(18105);
+    server.raw().Post("/score", [&](const httplib::Request& req, httplib::Response& res) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            captured_bodies.push_back(req.body);
+        }
+        res.set_content(R"({"anomaly_score":0.0,"model_version":"v1"})", "application/json");
+    });
+
+    MlScoreClientConfig client_config;
+    client_config.base_url = "http://127.0.0.1:18105";
+    CollectingAlertSink alert_sink;
+    MlScoringWorkerConfig worker_config;
+    worker_config.queue_capacity = 64;
+    MlScoringWorker worker(MlScoreClient(client_config), &alert_sink, worker_config);
+
+    MlAnomalyDetectorConfig detector_config;
+    detector_config.min_orders_before_submit = 5;
+    detector_config.submit_every_n_orders = 5;
+    MlAnomalyDetector detector(&worker, detector_config);
+
+    OrderBook book("ACME");
+    AccountRegistry accounts;
+
+    // First tumbling window: 5 orders at ts=100000..100004 -- submission #1
+    // at order_count=5.
+    for (int i = 0; i < 5; ++i) {
+        Order order = make_new("O" + std::to_string(i), "ACC-1", "ACME", 100000 + i);
+        book.apply(order);
+        detector.evaluate(book, DetectorEvent{order}, accounts);
+    }
+
+    // Session-boundary regression: the next order's timestamp jumps
+    // backward to well before the current window's start (not forward past
+    // window_duration_ns) -- exactly what a fresh demo session looks like
+    // against the same anchor. 5 more orders reach the next
+    // submit_every_n_orders boundary either way; what differs is whether
+    // that boundary is order_count=5 (window correctly reset) or
+    // order_count=10 (window incorrectly kept accumulating).
+    for (int i = 0; i < 5; ++i) {
+        Order order = make_new("R" + std::to_string(i), "ACC-1", "ACME", 50 + i);
+        book.apply(order);
+        detector.evaluate(book, DetectorEvent{order}, accounts);
+    }
+
+    std::atomic<bool> stop{false};
+    std::thread worker_thread([&] { worker.run(stop); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    stop.store(true, std::memory_order_release);
+    worker_thread.join();
+
+    std::lock_guard<std::mutex> lock(mutex);
+    ASSERT_EQ(captured_bodies.size(), 2u) << "expected submissions at order 5 and at order 10 regardless of "
+                                              "whether the window reset correctly -- see the order_count assertion "
+                                              "below for what actually distinguishes correct from buggy behavior";
+    EXPECT_NE(captured_bodies[0].find(R"("order_count":5)"), std::string::npos);
+    EXPECT_NE(captured_bodies[1].find(R"("order_count":5)"), std::string::npos)
+        << "second submission's window must reset to order_count=5 on the backward jump, not accumulate to 10 "
+           "across the session-boundary regression -- captured body: "
+        << captured_bodies[1];
+}
+
 TEST(MlAnomalyDetector, TracksSeparateWindowsPerAccountInstrumentPair) {
     std::mutex mutex;
     std::vector<std::string> captured_bodies;

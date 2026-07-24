@@ -2,9 +2,12 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "alert_sink.hpp"
 #include "depth_snapshot.hpp"
@@ -13,6 +16,24 @@
 #include "spsc_ring_buffer.hpp"
 
 namespace tse::api {
+
+// One resting-order-book-mutating event, exactly as it arrived off the
+// wire -- BOOK's FIX message feed. Deliberately built from the same
+// tse::fix::Order/Execution fields every other layer already uses (see
+// to_book_event() in live_book_registry.cpp), not a new independent
+// representation -- msg_type is the one derived field, mapping
+// OrderStatus (New/Cancelled/Replaced) or "this was an Execution" onto the
+// FIX message-type vocabulary a compliance analyst would recognize.
+struct BookEvent {
+    int64_t timestamp_ns{0};
+    std::string instrument_id;
+    std::string msg_type;  // "NEW" | "CANCEL" | "REPLACE" | "EXECUTION"
+    std::string side;      // "BUY" | "SELL"
+    double price{0.0};
+    int64_t qty{0};
+    std::string order_id;
+    std::string account_id;
+};
 
 // The api/-specific consumer loop: the same ring-buffer pop-and-process
 // shape as pipeline/'s own LiveConsumer (Phase 6), but with every
@@ -62,8 +83,25 @@ public:
         return events_skipped_inconsistent_.load(std::memory_order_relaxed);
     }
 
+    // Pass-through to LivePipeline::detector_count() -- immutable after
+    // construction, so no lock needed here either.
+    size_t detector_count() const { return pipeline_.detector_count(); }
+
+    // BOOK's FIX message feed, most-recent-last, capped at
+    // kMaxEventsPerInstrument per instrument (a bounded ring, not an
+    // unbounded log -- same "don't let a display panel grow forever"
+    // reasoning as OrderBookDepth's own VISIBLE_LEVELS cap on the
+    // frontend). Guarded by the same pipeline_mutex_ run() already holds
+    // while recording each event, not a second lock. Returns at most
+    // `limit` of the most recent events; empty if this instrument has
+    // never had an event.
+    std::vector<BookEvent> recent_events(const std::string& instrument_id, size_t limit);
+
 private:
     void process_one(const tse::ingestion::IngestionEvent& event);
+    void record_event(const tse::ingestion::IngestionEvent& event);
+
+    static constexpr size_t kMaxEventsPerInstrument = 200;
 
     tse::ingestion::SpscRingBuffer<tse::ingestion::IngestionEvent>& queue_;
     tse::pipeline::LivePipeline& pipeline_;
@@ -71,6 +109,7 @@ private:
     std::mutex pipeline_mutex_;
     std::atomic<uint64_t> events_processed_{0};
     std::atomic<uint64_t> events_skipped_inconsistent_{0};
+    std::unordered_map<std::string, std::deque<BookEvent>> recent_events_by_instrument_;
 };
 
 }  // namespace tse::api

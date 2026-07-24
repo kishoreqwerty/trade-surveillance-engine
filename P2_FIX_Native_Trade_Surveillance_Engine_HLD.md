@@ -1,23 +1,6 @@
 # FIX-Native Trade Surveillance Engine (P2) — High-Level Design
 
 **Language:** C++17 (locked, core engine) + Python (isolated ML microservice) + React (dashboard)
-**Companion project:** Low-Latency Market Data Feed Handler (C++20/23, pre-trade, lock-free SPSC, sharded by instrument).
-
----
-
-## 0. Relationship to the Feed Handler — deliberate overlap, explicit differentiation
-
-This design accepts real overlap with the Feed Handler at the infrastructure layer: both use lock-free/low-latency ingestion and both maintain live state. That overlap was a conscious trade-off (chosen over a narrower batch-only design) in exchange for a bigger, more production-realistic system. To keep the two projects distinct in an interview narrative rather than reading as the same project twice, hold onto these differences and lead with them when asked "how is this different from your other C++ project":
-
-| | Feed Handler | P2 (this project) |
-|---|---|---|
-| Direction | Pre-trade — exchange market data in | Post-trade — own OMS execution/order flow in, via FIX |
-| Protocol | Raw exchange market data feed (binary/proprietary framing) | FIX 4.2 (industry-standard order/execution protocol) |
-| Core hard problem | Ingestion throughput + lock-free correctness under contention | Live detection-logic correctness under a false-positive/negative tradeoff, running stateful rules against continuously-updating book state |
-| What "done" means | Sanitizer-clean under load, verified latency percentiles | Precision/recall/F1 against labeled ground truth, verified detection logic |
-| Downstream consumer | A trading decision engine (not built — out of scope) | A compliance analyst (alert queue, case management) |
-
-The story: Feed Handler proves you can build low-latency infrastructure. P2 proves you can build low-latency infrastructure **and** put a correctness-critical, regulator-facing decision system on top of it. That combination is the differentiator, not a liability — but only if you can articulate it, so keep this table close.
 
 ---
 
@@ -108,7 +91,7 @@ Evaluation Harness ← replays labeled synthetic scenarios through the same pipe
 | Decision | Alternative Considered | Rationale | What's Measured |
 |---|---|---|---|
 | FIX 4.2 as the native ingestion protocol (QuickFIX) | Flat internal event log, no protocol layer | FIX is a widely recognized keyword across the entire capital markets industry — not just top-tier firms, but mid/small brokerages, prop shops, custodians, and RegTech vendors. Parsing real protocol messages (not a toy format) is a concrete, checkable skill claim with the broadest opportunity surface of any design choice in this project | FIX parsing correctness against known message fixtures |
-| SPSC ring buffer feeding Kafka (librdkafka), not either alone | SPSC-only (no durability) or Kafka-only (no ultra-low-latency in-process hot path) | SPSC gives the in-process lock-free hot path (reuses/extends what you proved in the Feed Handler, now applied to FIX message flow); Kafka gives durable, replayable event log needed by the evaluation harness to replay labeled scenarios deterministically | Ingestion throughput; replay determinism (same input → same detector output) |
+| SPSC ring buffer feeding Kafka (librdkafka), not either alone | SPSC-only (no durability) or Kafka-only (no ultra-low-latency in-process hot path) | SPSC gives the in-process lock-free hot path for FIX message flow; Kafka gives durable, replayable event log needed by the evaluation harness to replay labeled scenarios deterministically | Ingestion throughput; replay determinism (same input → same detector output) |
 | Deterministic rule-based detectors run inline against live book state, Isolation Forest kept as a separate, out-of-band microservice | Everything in one C++ process, including ML scoring | Keeps the hot path (book update → rule-based detection) deterministic, testable, and sanitizer-verifiable in pure C++; the ML model gets Python's ecosystem (scikit-learn) without polluting the correctness-critical core, and its async placement is itself a realistic architecture pattern | Rule-based detector latency (must stay on hot path budget); Isolation Forest scored separately, evaluated on its own precision/recall |
 | TimescaleDB via libpqxx | SQLite | Time-series-native storage matches the actual shape of this data; libpqxx gives direct C++ Postgres wire-protocol access without an ORM layer hiding query cost | Query correctness + time-range query performance for the dashboard/API |
 | React dashboard with dark trading-terminal aesthetic | No UI / API-only | A demoable, screen-shareable interface is a real asset in interviews | N/A (demo asset) |
@@ -148,11 +131,11 @@ Evaluation Harness ← replays labeled synthetic scenarios through the same pipe
 
 Two hard problems now, and both need to be verified honestly, not asserted:
 
-1. **Concurrency/ingestion correctness** (shared with the Feed Handler's thesis): SPSC ring buffer correctness under load, Kafka replay determinism, sanitizer-clean under TSan/ASan. Necessary but not the differentiator vs. the Feed Handler — table stakes, done right, not the headline.
+1. **Concurrency/ingestion correctness**: SPSC ring buffer correctness under load, Kafka replay determinism, sanitizer-clean under TSan/ASan. Necessary infrastructure — table stakes, done right, not the headline on its own.
 2. **Detection-logic correctness** (the actual differentiator): does the live, inline detection pipeline separate abusive from non-abusive behavior at an acceptable false-positive rate, measured via the evaluation harness's threshold sweep and precision/recall curve, and does it still fire correctly when replayed against the one real public case (Sarao)? This is the number that should headline the project.
 
 Bug reports during the build phase should document, for every fix: what the harness measured before, what changed, what it measures after.
 
 ---
 
-*Next: phased build guide with explicit "done when" criteria per phase.*
+*This design was fully implemented — see `README.md` for the finished system's architecture summary, detection results, and setup instructions, and `P2_trade_surveillance_engine_architecture.md` for the concrete module-by-module technical reference.*

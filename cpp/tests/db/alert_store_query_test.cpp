@@ -101,3 +101,98 @@ TEST_F(AlertStoreQueryTest, FilterByDetectorTypeWithNoMatchesReturnsEmpty) {
     std::vector<StoredAlert> found = store_->query_alerts_by_detector("MarkingTheCloseDetector");
     EXPECT_TRUE(found.empty());
 }
+
+// ALERTS tab's page-footer query: list_alerts_paginated(). A dedicated
+// fixture (12 alerts, known detector/status spread) rather than reusing
+// AlertStoreQueryTest's 4 -- pagination needs enough rows to span more
+// than one page to actually prove offset/limit, not just "returns
+// something."
+class AlertStorePaginationTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        store_ = connect_or_skip();
+        if (!store_) GTEST_SKIP() << "TimescaleDB not reachable at 127.0.0.1:5432 -- run `docker compose up -d timescaledb` first.";
+
+        // 12 alerts, alert_id order == insertion order below (real
+        // insertion order, not window_start_ns -- see list_recent_alerts's
+        // comment). 8 WashTradeDetector, 4 SpoofingLayeringDetector.
+        for (int i = 0; i < 12; ++i) {
+            const std::string detector = i < 8 ? "WashTradeDetector" : "SpoofingLayeringDetector";
+            int64_t id = store_->insert_alert(make_alert(detector, {"ACC-1"}, 1'000'000'000LL * (i + 1)));
+            inserted_ids_.push_back(id);
+        }
+        // Close two of the WashTradeDetector alerts so a status filter has
+        // something real to narrow.
+        store_->update_alert_status(inserted_ids_[0], "CLOSED");
+        store_->update_alert_status(inserted_ids_[1], "CLOSED");
+    }
+
+    std::unique_ptr<AlertStore> store_;
+    std::vector<int64_t> inserted_ids_;
+};
+
+TEST_F(AlertStorePaginationTest, FirstPageReturnsMostRecentInRealInsertionOrder) {
+    auto page = store_->list_alerts_paginated(std::nullopt, std::nullopt, /*limit=*/5, /*offset=*/0);
+    EXPECT_EQ(page.total_count, 12);
+    ASSERT_EQ(page.alerts.size(), 5u);
+    // Most-recently-inserted first -- inserted_ids_[11], [10], [9], [8], [7].
+    for (int i = 0; i < 5; ++i) {
+        EXPECT_EQ(page.alerts[i].alert_id, inserted_ids_[11 - i]);
+    }
+}
+
+TEST_F(AlertStorePaginationTest, SecondPageContinuesWhereFirstLeftOff) {
+    auto first = store_->list_alerts_paginated(std::nullopt, std::nullopt, 5, 0);
+    auto second = store_->list_alerts_paginated(std::nullopt, std::nullopt, 5, 5);
+    EXPECT_EQ(second.total_count, 12);
+    ASSERT_EQ(second.alerts.size(), 5u);
+    EXPECT_EQ(second.alerts[0].alert_id, inserted_ids_[6]);
+    EXPECT_EQ(second.alerts[4].alert_id, inserted_ids_[2]);
+    // No overlap between consecutive pages.
+    for (const auto& a : first.alerts) {
+        for (const auto& b : second.alerts) {
+            EXPECT_NE(a.alert_id, b.alert_id);
+        }
+    }
+}
+
+TEST_F(AlertStorePaginationTest, LastPageIsPartialAndTotalCountStillAccurate) {
+    // 12 rows, page size 5 -> pages of 5, 5, 2.
+    auto third = store_->list_alerts_paginated(std::nullopt, std::nullopt, 5, 10);
+    EXPECT_EQ(third.total_count, 12);
+    ASSERT_EQ(third.alerts.size(), 2u);
+    EXPECT_EQ(third.alerts[0].alert_id, inserted_ids_[1]);
+    EXPECT_EQ(third.alerts[1].alert_id, inserted_ids_[0]);
+}
+
+TEST_F(AlertStorePaginationTest, OffsetPastTheEndReturnsEmptyWithCorrectTotalCount) {
+    auto page = store_->list_alerts_paginated(std::nullopt, std::nullopt, 5, 100);
+    EXPECT_EQ(page.total_count, 12);
+    EXPECT_TRUE(page.alerts.empty());
+}
+
+TEST_F(AlertStorePaginationTest, DetectorFilterNarrowsBothPageAndTotalCount) {
+    auto page = store_->list_alerts_paginated("SpoofingLayeringDetector", std::nullopt, 10, 0);
+    EXPECT_EQ(page.total_count, 4);
+    ASSERT_EQ(page.alerts.size(), 4u);
+    for (const auto& a : page.alerts) EXPECT_EQ(a.alert.detector_name, "SpoofingLayeringDetector");
+}
+
+TEST_F(AlertStorePaginationTest, StatusFilterNarrowsBothPageAndTotalCount) {
+    auto page = store_->list_alerts_paginated(std::nullopt, std::string("CLOSED"), 10, 0);
+    EXPECT_EQ(page.total_count, 2);
+    ASSERT_EQ(page.alerts.size(), 2u);
+    for (const auto& a : page.alerts) EXPECT_EQ(a.status, "CLOSED");
+}
+
+TEST_F(AlertStorePaginationTest, CombinedDetectorAndStatusFilterIntersects) {
+    // Both CLOSED alerts are WashTradeDetector, so this should match those
+    // exact 2, not the other 6 open WashTradeDetector alerts.
+    auto page = store_->list_alerts_paginated("WashTradeDetector", std::string("CLOSED"), 10, 0);
+    EXPECT_EQ(page.total_count, 2);
+    ASSERT_EQ(page.alerts.size(), 2u);
+    for (const auto& a : page.alerts) {
+        EXPECT_EQ(a.alert.detector_name, "WashTradeDetector");
+        EXPECT_EQ(a.status, "CLOSED");
+    }
+}

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <chrono>
+#include <string>
 #include <thread>
+#include <utility>
 
 #include <crow.h>
 
@@ -19,8 +21,10 @@ namespace tse::api::testutil {
 // tests.
 class TestApiServer {
 public:
-    TestApiServer(int port, tse::db::AlertStore* store, tse::api::LiveBookRegistry* book_registry) : port_(port) {
-        tse::api::register_routes(app_, store, book_registry);
+    TestApiServer(int port, tse::db::AlertStore* store, tse::api::LiveBookRegistry* book_registry,
+                  std::string evaluation_results_dir = "cpp/harness/results")
+        : port_(port) {
+        tse::api::register_routes(app_, store, book_registry, {}, std::move(evaluation_results_dir));
         thread_ = std::thread([this] { app_.port(port_).multithreaded().run(); });
         app_.wait_for_server_start();
     }

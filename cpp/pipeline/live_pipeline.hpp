@@ -68,6 +68,12 @@ public:
 
     uint64_t inconsistent_events_skipped() const { return inconsistent_events_skipped_; }
 
+    // Fixed at construction, never mutated after -- safe to read from any
+    // thread without the caller taking a lock (there is no writer to race
+    // against). api/'s status endpoint uses this for its "detectors
+    // active" tile.
+    size_t detector_count() const { return detectors_.size(); }
+
 private:
     std::vector<std::unique_ptr<tse::detectors::IDetector>> detectors_;
     tse::detectors::AccountRegistry accounts_;

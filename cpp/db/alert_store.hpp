@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -16,6 +17,15 @@ class connection;
 }  // namespace pqxx
 
 namespace tse::db {
+
+// One page of list_alerts_paginated()'s result, plus the real (COUNT(*),
+// not estimated) total matching the same filter -- what lets a caller
+// render "page X of Y" and a real total-alert-count honestly, not from a
+// guess.
+struct PaginatedAlerts {
+    std::vector<StoredAlert> alerts;
+    int64_t total_count{0};
+};
 
 // Owns the connection to TimescaleDB and is the only class in this project
 // that speaks SQL. Every write is its own transaction -- Phase 8's job is
@@ -60,6 +70,16 @@ public:
     // The query correctness surface the build guide's Phase 8 "Done when"
     // names explicitly: time-range, filter-by-account, filter-by-detector-
     // type. Also exactly what api/ (Phase 9) will call over REST.
+    //
+    // query_alerts_by_account()/query_alerts_by_detector() order by
+    // alert_id (real insertion order), not window_start_ns (the synthetic
+    // event clock, which cpp/api/main.cpp's demo feed loop can make
+    // regress backward at session boundaries -- see list_recent_alerts()
+    // below and cpp/pipeline/README.md). query_alerts_by_time_range()
+    // still orders by window_start_ns deliberately: its start/end
+    // parameters are themselves synthetic-time bounds the caller chose, so
+    // ordering the filtered result by that same field is the caller's own
+    // request, not an implicit recency proxy.
     std::vector<StoredAlert> query_alerts_by_time_range(int64_t window_start_ns, int64_t window_end_ns) const;
     std::vector<StoredAlert> query_alerts_by_account(const std::string& account_id) const;
     std::vector<StoredAlert> query_alerts_by_detector(const std::string& detector_name) const;
@@ -67,7 +87,25 @@ public:
     // Phase 9 additions -- api/'s default "list alerts" (no filter given)
     // and single-alert-lookup endpoints, plus the write side of case
     // management (api/'s compliance action endpoints).
+    //
+    // Orders by alert_id DESC (real insertion order), not window_start_ns
+    // DESC -- see .cpp for the full reasoning. "Most recent 250" here means
+    // "most recently inserted," which is what a compliance analyst
+    // actually wants from a live feed and what api/'s dashboard callers
+    // assume; it is not guaranteed to be "highest window_start_ns."
     std::vector<StoredAlert> list_recent_alerts(int limit) const;
+
+    // ALERTS tab's paginated list query, added for real offset-based
+    // pagination (a page footer with real prev/next and an honest total
+    // count, not client-side slicing of one big fetched window).
+    // detector_name/status: nullopt means "no filter on that field" --
+    // both real WHERE-clause filters, not client-side. Free-text search
+    // (instrument/account substring) deliberately stays client-side, out
+    // of this method's scope -- see dashboard/src/tabs/AlertsTab.tsx's own
+    // comment for why. Orders by alert_id DESC, same real-insertion-order
+    // reasoning as list_recent_alerts() above.
+    PaginatedAlerts list_alerts_paginated(std::optional<std::string> detector_name, std::optional<std::string> status,
+                                           int limit, int offset) const;
     std::optional<StoredAlert> get_alert(int64_t alert_id) const;
     // Throws pqxx::check_violation if new_status isn't one of schema.sql's
     // allowed values -- deliberately not re-validated against a second,
@@ -79,6 +117,15 @@ public:
 
     // Test-only convenience -- never called outside cpp/tests/db/.
     void truncate_all();
+
+    // A genuine live-liveness check for api/'s status tile -- deliberately
+    // NOT conn_->is_open(), which only reflects libpqxx's cached status
+    // from the last I/O attempt (it wraps libpq's PQstatus(), which is
+    // updated lazily on actual traffic, not polled). If TimescaleDB drops
+    // mid-session and nothing has queried since, is_open() keeps reporting
+    // true. This runs a trivial real round trip instead, so a genuine
+    // outage is caught on the next call rather than reported stale.
+    bool is_connected() const;
 
 private:
     std::unique_ptr<pqxx::connection> conn_;

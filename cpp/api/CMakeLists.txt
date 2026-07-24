@@ -4,7 +4,7 @@ add_library(tse_api STATIC
     api_server.cpp
 )
 target_include_directories(tse_api PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(tse_api PUBLIC tse_db tse_pipeline tse_orderbook Crow::Crow)
+target_link_libraries(tse_api PUBLIC tse_db tse_pipeline tse_orderbook tse_ml_client Crow::Crow)
 
 # The live demo server binary -- Phase 9's actual "Done when" entrypoint:
 # a real, long-running process a dashboard can be pointed at and see

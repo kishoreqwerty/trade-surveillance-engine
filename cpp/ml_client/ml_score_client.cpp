@@ -38,4 +38,9 @@ std::optional<ScoringResult> MlScoreClient::score(const ScoringRequest& request)
     return decode_scoring_response(res->body);
 }
 
+bool MlScoreClient::health_check() {
+    httplib::Result res = client_->Get("/health");
+    return res && res->status == 200;
+}
+
 }  // namespace tse::ml_client

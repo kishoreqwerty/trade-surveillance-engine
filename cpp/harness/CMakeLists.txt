@@ -2,6 +2,7 @@ add_library(tse_harness STATIC
     ground_truth.cpp
     replay_runner.cpp
     evaluation.cpp
+    json_output.cpp
 )
 target_include_directories(tse_harness PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # tse_pipeline/tse_detectors/tse_ingestion/tse_fix listed before
@@ -15,7 +16,7 @@ target_include_directories(tse_harness PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # `target_link_libraries(tse_api_server PRIVATE tse_api tse_simulator
 # tse_fix tse_ml_client)` already depends on (tse_api's own chain reaches
 # tse_fix before the explicit tse_simulator entry there).
-target_link_libraries(tse_harness PUBLIC tse_pipeline tse_detectors tse_ingestion tse_fix tse_simulator)
+target_link_libraries(tse_harness PUBLIC tse_pipeline tse_detectors tse_ingestion tse_fix tse_simulator tse_ml_client)
 
 # Phase 10's actual "Done when" entrypoint: prints the real precision/
 # recall/F1 sweep, confusion matrices, and severity-gradient curve. Not
