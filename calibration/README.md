@@ -12,35 +12,61 @@ any path.** TAQ access is licensed for offline academic research use, not
 redistribution. Confirm exact redistribution terms once WRDS access is
 registered, before adding anything here beyond scripts.
 
-## Status
+## Status: complete
 
-Waiting on WRDS account approval. Everything that can be prepared without
-real data is done; nothing here has touched real TAQ data yet.
+Real WRDS Daily TAQ data was pulled for a 10-symbol equity basket (AAPL,
+DE, EBAY, GILD, HAS, JPM, MSFT, RF, TGT, XOM) and calibrated against.
+`output/stylized_facts.json` (derived aggregate statistics, over 1.4M+
+trades — no underlying rows) holds the real, committed results:
 
-## Once WRDS access is approved
+- **Trade size distribution**: p50 = 20 shares, p90 = 100, p99 = 448, mean ≈ 51.5
+- **Bid-ask spread**: p50 = 3 ticks, p90 = 7 ticks, mean ≈ 4.06 ticks
+- **Order arrival rate proxy**: 16.686/sec/instrument — applied directly as
+  `kEmpiricalOrderArrivalRatePerInstrumentPerSecond` in
+  `cpp/simulator/simulator.hpp` (rounded to 16.69)
+- **Cancellation-rate proxy** (quote-to-trade ratio — TAQ has no
+  order-level cancel messages, so this is a documented proxy, not a
+  direct pull): mean ≈ 1.46, used to sanity-check the generator's cancel
+  rate, not to replace it directly
 
-1. Read `PARAMETER_MAPPING.md` first — it maps every stylized fact this
-   phase needs to the exact `simulator/` constant it replaces, what TAQ
-   can and can't actually give you (it's a trade-and-quote tape, not an
-   order feed — cancellation rate is a proxy, not a direct pull), instrument
-   selection, date range, and the exact `trades.csv`/`quotes.csv` export
-   schema `scripts/compute_stylized_facts.py` expects.
-2. Query WRDS (the `wrds` Python package is the smoothest path — queries
-   the same backend the web UI does, writes the CSVs directly) and export
-   `trades.csv` + `quotes.csv` in that schema, into this directory (they
-   will not be committed — see `.gitignore` below).
-3. Run `scripts/compute_stylized_facts.py trades.csv quotes.csv` — writes
-   `output/stylized_facts.json`, the actual numbers (percentiles, spread
-   stats, the QTR cancellation-rate proxy), never the underlying rows.
-4. Hand-apply `output/stylized_facts.json`'s numbers to the `simulator/`
-   constants `PARAMETER_MAPPING.md` lists — deliberately a manual step
-   (reviewing "does this number make sense before it goes in a constant"
-   matters more here than automating the edit).
-5. Re-run Phase 10's evaluation harness (`cpp/harness/tse_harness_eval`)
-   with the recalibrated generator and document whether/how the numbers
-   changed in `cpp/harness/README.md` — per the build guide, this is
-   required, not optional, and "nothing changed" is a valid, reportable
-   outcome if that's what happens.
+Applying the calibrated order-arrival rate (an ~83x increase over the old
+guessed value) surfaced three real, since-fixed issues downstream — a
+`WashTradeDetector` relatedness-check bug, a `MarkingTheCloseDetector`
+scenario-scaling gap, and an RNG-stream confound between baseline and
+abuse-scenario generation — each investigated and fixed individually
+before any threshold was touched. Full before/after numbers in
+`PARAMETER_MAPPING.md`.
+
+FX and fixed-income baseline flow have no TAQ equivalent and remain
+uncalibrated, clearly labeled as such — see `PARAMETER_MAPPING.md`'s
+"What's independent of WRDS entirely" section.
+
+## How this was done (reproducible with fresh data)
+
+1. `PARAMETER_MAPPING.md` maps every stylized fact to the exact
+   `simulator/` constant it replaces, what TAQ can and can't actually
+   give you (it's a trade-and-quote tape, not an order feed —
+   cancellation rate is a proxy, not a direct pull), instrument
+   selection, date range, and the real `trades.csv`/`quotes.csv` export
+   schema `scripts/compute_stylized_facts.py` expects (WRDS's actual
+   column names, confirmed against a real export — `sym_root`/`time_m`/
+   `bidsiz`/`asksiz`, not a guessed schema).
+2. WRDS was queried via the `wrds` Python package (queries the same
+   backend the web UI does, writes the CSVs directly) for `trades.csv` +
+   `quotes.csv` in that schema, into this directory (never committed —
+   see `.gitignore` below).
+3. `scripts/compute_stylized_facts.py trades.csv quotes.csv` wrote
+   `output/stylized_facts.json` — the derived numbers only (percentiles,
+   spread stats, the QTR cancellation-rate proxy), never the underlying
+   rows.
+4. `output/stylized_facts.json`'s numbers were hand-applied to the
+   `simulator/` constants `PARAMETER_MAPPING.md` lists — deliberately a
+   manual step (reviewing "does this number make sense before it goes in
+   a constant" mattered more here than automating the edit).
+5. The evaluation harness (`cpp/harness/tse_harness_eval`) was re-run
+   with the recalibrated generator; what changed (including the three
+   bugs the rate change surfaced) is documented in `PARAMETER_MAPPING.md`
+   and `cpp/harness/README.md`.
 
 ## What didn't wait on WRDS
 

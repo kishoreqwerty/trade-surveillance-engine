@@ -24,12 +24,16 @@ reporting rule for this phase.
    detectors — the identical classes `cpp/api/main.cpp`'s production demo
    server uses.
 
-`MlAnomalyDetector` is deliberately excluded: it calls `ml_service/`
-asynchronously, and folding a live HTTP round-trip's timing into an
-evaluation run would reintroduce exactly the nondeterminism
-`KafkaReplayConsumer`'s seek-to-beginning design exists to avoid. Phase
-10's own scope (precision/recall/F1, threshold sweep, comparison against
-`StatisticalBaselineDetector`) only ever names the five Phase 5 detectors.
+`MlAnomalyDetector` is excluded from the baseline-comparison and severity-
+gradient sub-runs below (they don't need it, and it isn't free — a real
+`ml_service` HTTP round trip per scored window), but is included in the
+main evaluation run via `replay_through_kafka`'s opt-in `ml_eval`
+parameter. It calls `ml_service/` asynchronously, off the hot path by
+construction, which sat unaddressed as an evaluation gap from Phase 7
+through Phase 11 over concern that folding a live HTTP round trip's timing
+into an evaluation run would reintroduce exactly the nondeterminism
+`KafkaReplayConsumer`'s seek-to-beginning design exists to avoid — resolved
+structurally, not sidestepped; see "MlAnomalyDetector evaluation" below.
 
 `replay_through_kafka()` throws rather than returning a partial result if
 the broker is unreachable, if replay doesn't recover every published event,
@@ -515,6 +519,8 @@ function.
 
 ```bash
 docker compose up -d kafka   # KafkaReplayConsumer needs a real broker
+# ml_service must also be running (127.0.0.1:8000) -- the main run includes
+# MlAnomalyDetector and fails loud via health_check() if it isn't reachable.
 cmake --build build-bench --target tse_harness_eval
 ./build-bench/cpp/harness/tse_harness_eval
 ```
@@ -560,3 +566,166 @@ full in their owning modules, summarized here for continuity:
   inflated measured latency to ~2.2–2.4x that budget even with all other
   load stopped. Fixed with a TSan-specific (looser, still meaningful)
   budget; see `cpp/ml_client/README.md`.
+
+## MlAnomalyDetector evaluation (Phase 12 addition)
+
+`MlAnomalyDetector` was excluded from this file's evaluation entirely from
+Phase 7 (when it was built) through Phase 11 — see the now-superseded
+comment this replaced in `replay_runner.hpp`, which cited wall-clock
+nondeterminism from its async, out-of-band HTTP round trip to `ml_service/`.
+That gap sat unvalidated for five phases. It surfaced not from this file's
+own Phase 10/11 work but from **live dashboard observation in Phase 12**:
+the MONITOR tab's alert queue showed almost nothing but narrow-banded
+(0.72–0.76) `MlAnomalyDetector` alerts, which looked enough like a
+calibration problem to investigate — and turned out to be two real,
+independent, now-fixed/explained issues, not one.
+
+### Closing the async-evaluation gap
+
+The nondeterminism concern was real but solvable structurally, not by
+staying excluded forever. `MlScoringWorker::run(stop_flag)` already has the
+identical "drain until stop_flag observed AND queue empty" contract
+`LiveConsumer::run(producer_done)` uses — so `replay_through_kafka()`'s
+`ml_eval` parameter (opt-in; `nullptr` reproduces the original five-
+detector-only behavior for every existing caller) just does one more
+instance of the pattern already established for the main consumer thread:
+join the consumer thread first (guaranteeing every `submit()` call has
+already happened), only then signal the ML worker to stop and join it. Its
+own drain contract then guarantees every request submitted before that
+point is fully scored — including the real HTTP round trip — before the
+join returns. The result never depends on how long any individual `score()`
+call took; only the main evaluation run (`main_eval_config()`) pays this
+cost, not the baseline-comparison or severity-gradient sub-runs.
+
+Two more adaptations were needed, both evaluation-only, neither touching
+`ml_client/`'s production code:
+
+- **Matching granularity.** `compute_confusion_matrix` matches on
+  `Alert::order_ids`, but `MlScoringWorker` never populates that field for
+  ML alerts — its evidence is a rolling per-(account, instrument) window
+  statistic, not a claim about one specific order. Rather than extending
+  production structs (`WindowStats`, `ScoringRequest`) just to serve an
+  eval need, `evaluation.hpp`'s `ml_anomaly_window_is_positive` matches at
+  the detector's native granularity instead: ground truth is "did a
+  non-baseline order for this same (account, instrument) key fall inside
+  this scored window." The window's true start isn't threaded through to
+  `Alert` either (`window_start_ns == window_end_ns`, just the triggering
+  order's own timestamp), so this reconstructs a safe over-approximation,
+  `[triggering_ts - window_duration_ns, triggering_ts]`, which by
+  construction can only ever call a window positive that a tighter
+  reconstruction might have called negative — never the reverse.
+- **Raw scores for the sweep.** Production's `MlScoringWorker` only ever
+  forwards an `Alert` once `anomaly_score >= alert_threshold` (0.7 live).
+  Sweeping 0.0–1.0 like the other five detectors needs every scored
+  window's raw score, not just the ones that already cleared that gate — so
+  the harness's own `MlEvalConfig`-driven worker instance is constructed
+  with `alert_threshold = 0.0`, a config-only choice local to the eval run,
+  letting every successfully scored window become an `Alert` here.
+
+### A second real bug, found while investigating the first
+
+The live dashboard's narrow score band (0.72–0.76, in a system where
+`alert_threshold = 0.7`) didn't match this file's own harness numbers once
+`MlAnomalyDetector` was wired in: at threshold 0.7, the harness's realistic-
+scale traffic (210 accounts, 15 instruments) showed **precision 1.0**, not
+"fires on almost everything." Two targeted diagnostics (temporary,
+non-committed executables built against the same `replay_through_kafka`
+machinery — removed after use) isolated why:
+
+1. A demo-scale (18 accounts, 3 instruments), single continuous run showed
+   a mild but real skew (mean score 0.538, against 0.5 as the model's own
+   neutral point) — consistent with `ml_service/app/training_data.py`'s own
+   acknowledged independence from the real simulator — but nothing close to
+   the live pattern.
+2. Reproducing `cpp/api/main.cpp`'s *actual* feed shape — repeated 90s
+   sessions all sharing one fixed timestamp anchor, the same
+   session-boundary regression already diagnosed and fixed once this phase
+   in `SpoofingLayeringDetector`'s `AmbientTracker` — found a second,
+   independent instance of the identical bug class in
+   `MlAnomalyDetector::handle_order()`'s tumbling-window reset:
+   `order.timestamp_ns - stats.window_start_ns > config_.window_duration_ns`
+   is never true on a *backward* jump, so the window silently never resets,
+   and `order_count`/`total_qty`/`orders_per_second` accumulate across
+   unboundedly many session loops instead of one real 60s window. Measured,
+   matched-scale comparison: this alone raised the fraction of scored
+   windows landing ≥ 0.7 by **47x** (0.1% → 4.7%).
+
+Fixed the same way `AmbientTracker` was: the reset condition now also
+fires on `order.timestamp_ns < stats.window_start_ns`
+(`cpp/ml_client/ml_anomaly_detector.cpp`). Regression test
+`MlAnomalyDetector.WindowResetsOnBackwardTimestampRegressionAcrossASessionBoundary`
+(`cpp/tests/ml_client/ml_anomaly_detector_test.cpp`) verified fails against
+the pre-fix code with the actual wrong value (`order_count:10`, the
+accumulated count across the regression, not `order_count:5`, a correctly
+reset window) before being confirmed to pass against the fix — same
+before/after discipline as the `AmbientTracker` test.
+
+### Real numbers (main evaluation run, post-fix)
+
+```
+--- MlAnomalyDetector threshold sweep (0.0 .. 1.0 step 0.1), any injected abuse ---
+  requests scored this run: 17158
+  threshold=0.0   TP=118  FP=17040  FN=0   TN=0      P=0.007  R=1.000  F1=0.014
+  threshold=0.4   TP=118  FP=17037  FN=0   TN=3      P=0.007  R=1.000  F1=0.014
+  threshold=0.5   TP=98   FP=14658  FN=20  TN=2382   P=0.007  R=0.831  F1=0.013
+  threshold=0.6   TP=60   FP=273    FN=58  TN=16767  P=0.180  R=0.508  F1=0.266
+  threshold=0.7   TP=22   FP=0      FN=96  TN=17040  P=1.000  R=0.186  F1=0.314
+  threshold=0.8   TP=0    FP=0      FN=118 TN=17040  P=n/a    R=0.000  F1=n/a
+```
+
+Full 0.0–1.0 sweep (and `requests_scored`/`ml_anomaly_sweep` in
+`results/evaluation.json`) reproduced verbatim by running
+`./tse_harness_eval` (requires `ml_service` running at `127.0.0.1:8000`,
+checked via a real `health_check()` before the replay starts — fails loud,
+not silently, if it isn't).
+
+### Recalibration: keep 0.7, not the reverse
+
+**0.7 is this sweep's own empirical F1-optimum** — the highest F1 (0.314)
+of any point in the full 0.0–1.0 sweep, with perfect precision (1.0).
+Every threshold below it trades precision away far faster than it buys
+recall: 0.6 buys +32 points of recall (0.186 → 0.508) at the cost of 82
+points of precision (1.0 → 0.180, 273 false positives instead of 0) — not
+a trade a compliance queue should make. The live 0.7 default was never
+actually validated against ground truth before this phase (see "unvalidated
+gap" above); it turns out to already be the right number, not by design but
+by coincidence — recalibration based on real data confirms the existing
+value rather than changing it. Recorded as `MlAnomalyDetector`'s canonical
+entry in `results/evaluation.json` at threshold 0.7, same as every other
+detector's one operating-threshold entry.
+
+Recall at that point (0.186 — 82% of true anomalous windows missed) is
+genuinely weak in absolute terms, and honestly reported as weak, not
+excused by F1 being locally optimal.
+
+### Is retraining `ml_service`'s model worth a follow-on? Not clearly, not yet
+
+The live dashboard's alarming appearance (near-universal firing, a
+near-zero-variance score band) turned out to be driven predominantly by two
+now-resolved/explained causes — the window-reset bug (fixed) and the demo
+server's small 18-account/3-instrument pool producing sparser, burstier
+per-key traffic than either the training baseline or this harness's own
+210-account evaluation traffic — **not** primarily by the model itself
+being unable to discriminate. Once both are accounted for, the model
+achieves perfect precision at 0.7 against real ground truth at a realistic
+account/instrument scale. That's evidence *against* an urgent retraining
+need, not for one.
+
+The real, honestly-reported weak spot is recall (18.6% at the F1-optimal
+threshold) — retraining `ml_service`'s `IsolationForest` on data resembling
+the actual `tse::simulator::generate_simulation()` output (instead of
+`training_data.py`'s independently-generated lognormal baseline, which
+its own docstring already flags as "not a claim of calibrated realism")
+*could* plausibly improve that. But there's no direct evidence here that
+training/serving skew specifically (rather than the five available
+features — `order_count`, `total_qty`, `avg_qty`, `cancel_ratio`,
+`orders_per_second` — being weakly discriminative for whatever abuse
+signatures evade a 0.7 threshold) is the dominant cause of the recall gap.
+Retraining is a real, separately-scoped candidate worth considering later,
+not something to start on this evidence alone — flagging it here rather
+than proceeding, per the explicit scope boundary for this investigation.
+A cheaper, lower-risk lever worth considering first: widening
+`cpp/api/main.cpp`'s `demo_session_config()` account/instrument pool closer
+to this harness's own scale, which the diagnostics above suggest would
+independently reduce the live dashboard's score-inflation effect without
+touching the model at all.

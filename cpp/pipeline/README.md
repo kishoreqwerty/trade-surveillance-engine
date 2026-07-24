@@ -189,3 +189,173 @@ findings in this project's own code, like Bug 3, aren't masked by
 third-party noise. Zero TSan warnings anywhere in the final run's full
 captured log (`grep -c "WARNING: ThreadSanitizer"` → 0), plus 5 additional
 repeated clean runs of the specific test that originally caught Bug 3.
+
+## Alert-persistence stall investigation (Phase 12) — a real bug found, the original trigger unresolved
+
+Discovered indirectly: Phase 12's KPI strip showed `ML SERVICE: HEALTHY`
+and real `MlAnomalyDetector` alerts, but a live screenshot review noticed
+the alert queue was *entirely* `MlAnomalyDetector`, all clustered in a
+narrow score band — worth investigating before trusting it, not
+dismissing as "ML is just active right now."
+
+**What was actually observed, confirmed via direct queries against the
+real alert store, not inferred from the UI.** A `tse_api_server` process
+running 7h23m had its *newest* alert — across all six detectors,
+including `MlAnomalyDetector` — sitting at ~7.2 hours old
+(`time.time_ns() - alert.window_start_ns`, both real epoch-ns, no
+timezone ambiguity). A live 30-second wait produced zero new alerts, from
+any detector. Meanwhile `GET /api/orderbook/ACME/snapshot`'s `sequence`
+kept climbing the entire time (confirmed by direct repeated polling) —
+the live pipeline itself was demonstrably healthy; only alert persistence
+had gone permanently silent, roughly 14 minutes into that process's life,
+with no crash.
+
+**Every plausible mechanism was tested directly, not assumed:**
+
+- **Consumer thread death.** Ruled out immediately: `OrderBook::apply()`
+  and detector `evaluate()` happen sequentially in the same
+  `LivePipeline::process()` call (see above) — if the consumer thread had
+  died, book state would have frozen too. It never did, in any observed
+  run, stalled or healthy.
+- **`DbAlertSink::on_alert()` throwing silently.** `on_alert()` has no
+  try/catch by design (`db_alert_sink.hpp`) — an uncaught exception
+  escaping the consumer thread's entry point calls `std::terminate()`,
+  crashing the whole process. It never crashed, in any run. Temporarily
+  wrapped `on_alert()` in a logging try/catch/rethrow to confirm directly:
+  across a 25-minute healthy run, zero throws logged.
+- **A genuine data race.** Rebuilt `tse_api_server` under TSan
+  (`build-tsan`), removed the demo feeder's 15ms pacing entirely to force
+  maximum throughput (same idea as this file's own sustained-load tests),
+  and ran it for 25+ minutes across two separate attempts, totaling
+  3.5M+ processed events. TSan found 3 races — all the same one,
+  confirmed third-party: `crow::CerrLogHandler::log()` racing on
+  `std::cerr`'s internal `ios_base::width` state across concurrent HTTP
+  handler threads (Crow's own multithreaded request logging, not this
+  project's code). Zero races found anywhere in `LivePipeline`,
+  `DbAlertSink`, `LiveBookRegistry`, any detector, or `MlScoringWorker` —
+  consistent with the architecture: `MlScoringWorker` runs on its own
+  thread but never touches detector state, only the shared `alert_sink_`
+  (confirmed properly mutex-guarded by reading `AlertStore::insert_alert()`
+  directly — takes its lock as the first line).
+- **Ring-buffer drop-oldest backpressure starving every detector before
+  dispatch.** The one theory that could explain a *stateless* detector
+  (`WashTradeDetector` has no member variables at all) going silent
+  alongside the stateful ones. Wired `SpscRingBuffer::dropped_count()`
+  through `LiveBookRegistry` and logged it alongside
+  `events_skipped_inconsistent()` every 5,000 events. Under forced max
+  throughput, `skipped_inconsistent/events_processed` climbed but
+  **decelerated** (53.2%→62.9% over 25 minutes, delta shrinking each
+  sample) — converging, not spiking. Every detector except
+  `MarkingTheCloseDetector` (frozen at 36 — its already-documented,
+  by-design lifetime-dedup exhaustion, not a bug) kept incrementing its
+  alert count on every single sample across 3.2M+ events. Ruled out.
+
+**One real, confirmed bug found and fixed along the way, independent of
+whether it's THE cause.** `SpoofingLayeringDetector::AmbientTracker`'s
+prune step was a front-only trim (`while event_ts - front > window, pop`)
+that silently assumes `event_ts` is monotonically non-decreasing across
+calls. `cpp/api/main.cpp`'s demo feeder reuses the same fixed
+`session_start_ns` anchor for every session in its infinite loop (by
+design, to keep `MarkingTheCloseDetector`'s close-time config valid
+across loops) — so the live `event_ts` stream genuinely regresses
+backward by up to 90 synthetic seconds at every session boundary, for the
+life of the process. Under the old trim, a regressed `event_ts` compared
+against a deque whose front is a much-later timestamp never satisfies the
+trim condition (the subtraction goes negative) — stale entries from a
+"future" session's perspective get stuck forever, inflating
+`recent_move_rate` and suppressing `move_score`. `FrontRunningDetector`'s
+analogous `recent_by_key_` structure was already immune (symmetric
+`std::llabs()` + full-scan `remove_if`, not a front-only assumption) —
+this was a genuine asymmetry in the codebase, not a hypothetical. Fixed
+by giving `AmbientTracker` the same symmetric pruning. Verified as a real
+regression, not just "the current implementation's behavior": temporarily
+reverted the fix, ran the new test
+(`AmbientPruneSurvivesATimestampRegressionAcrossASessionBoundary`) against
+the old code — it failed with a measurably wrong score (0.878 vs. the
+correct 83/90 ≈ 0.922) — then restored the fix and confirmed it passes.
+17/17 `SpoofingLayeringDetector` tests clean.
+
+**Honest conclusion: the original stall was never reproduced under
+controlled conditions, despite five separate attempts.** Of five runs —
+the original (naturally paced, real-world), a fresh restart at the same
+pacing, a fresh restart with debug instrumentation at the same pacing,
+and two TSan runs at forced maximum throughput (3.2M+ and 538K+ events
+respectively) — only the *original* process ever showed the stall. Every
+deliberate reproduction attempt since, including under far higher event
+volume and load than the original needed to fail, came back clean. This
+rules out "sustained load" or "long runtime" alone as a sufficient
+trigger; whatever caused it is rarer and more specific — possibly
+dependent on something about that process's exact history that hasn't
+been replicated (a one-time TimescaleDB/Docker blip during a long idle
+gap, some interaction with the many other `tse_api_server`
+restarts/rebuilds happening elsewhere that same session, or a race too
+rare to hit in ~4M cumulative events of deliberate hunting). The
+`AmbientTracker` fix above is real and worth having regardless, but it is
+**not confirmed as the original stall's cause** — it was found via code
+review during the search, not by reproducing the stall and observing it
+resolve.
+
+If this recurs: the debug instrumentation pattern used here is cheap to
+redeploy and already proved useful for bisection —
+(1) a heartbeat in `LivePipeline::process()`'s detector loop counting
+alerts found per detector index, (2) a logging try/catch/rethrow wrapper
+around `DbAlertSink::on_alert()`, (3) `SpscRingBuffer::dropped_count()`
+piped through `LiveBookRegistry` and logged alongside
+`events_skipped_inconsistent()`. All three were removed after this
+investigation (kept the codebase clean per CLAUDE.md's no-speculative-
+scaffolding standard) but the exact shape is preserved here, not just "we
+looked into it once."
+
+## The session-boundary regression bug, found a third and fourth time (Phase 12)
+
+The same root cause as `AmbientTracker` above — `cpp/api/main.cpp`'s demo
+feed loop reusing one fixed `session_start_ns` anchor for every session,
+so live event timestamps genuinely regress backward at every session
+boundary — turned out to have two more independent victims, found while
+investigating two *different* live-dashboard symptoms, neither of which
+was itself a stall:
+
+- **`MlAnomalyDetector::handle_order()`'s tumbling window** (`ml_client/`,
+  documented in full in `cpp/ml_client/README.md`'s addendum): the same
+  front-only-assumption shape as `AmbientTracker`, this time in a window-
+  reset condition (`order.timestamp_ns - stats.window_start_ns >
+  window_duration_ns`, never true on a backward jump), found while
+  investigating why the live dashboard's `MlAnomalyDetector` alerts
+  clustered in an implausibly narrow score band. Measured impact: 47x more
+  scored windows crossing the live 0.7 threshold in a matched before/after
+  comparison. Fixed with the same kind of reset-on-regression condition
+  `AmbientTracker` got.
+- **`AlertStore::list_recent_alerts()`'s ordering** (`db/`, documented in
+  full in `cpp/db/alert_store.cpp`'s comments): `ORDER BY window_start_ns
+  DESC` used the synthetic event clock as a stand-in for real recency,
+  found while investigating why `WashTradeDetector` and
+  `MarkingTheCloseDetector` had disappeared from the ALERTS tab's detector
+  filter dropdown (itself populated only from the currently-loaded 250-row
+  window — a real, if different, reason those two detectors could be
+  legitimately absent, but not the one actually in play here). Both
+  detectors were confirmed still firing via the alert_id-bounded
+  live-sampling method established during the original stall investigation
+  above; the dropdown's absence was instead traced to genuinely recent
+  alerts sorting *behind* older ones because their synthetic timestamp
+  happened to land in an already-passed band. `query_alerts_by_account()`
+  and `query_alerts_by_detector()` had the identical pattern and were
+  fixed alongside it; `dashboard/src/tabs/AlertsTab.tsx`'s own "sort by
+  time" column comparator had it too (fixed to sort by `alert_id`,
+  matching the backend). `query_alerts_by_time_range()` was checked and
+  left unchanged — it uses `window_start_ns` as an explicit, caller-chosen
+  filter range, not an implicit recency proxy, which is a legitimately
+  different use of the same field.
+
+Three independent modules (`detectors/`, `ml_client/`, `db/` — plus the
+dashboard itself), three independent discoveries, one root cause each
+time: code across this project assumed `fix::Order::timestamp_ns` (and
+anything downstream of it, like `Alert::window_start_ns`) is monotonically
+non-decreasing within a live process's lifetime, which has never been true
+of `cpp/api/main.cpp`'s demo feed. The pattern is now well enough
+understood that a future instance should be recognizable immediately: any
+code that compares two timestamps with a one-directional inequality
+(`new_ts - old_ts > threshold`) or sorts/orders by a `*_ns` field expecting
+it to track real recency is a candidate, and the fix is either symmetric
+distance (`std::llabs`) for windowed-retention logic or "prefer a real
+monotonic proxy" (an auto-increment ID, a `std::chrono::steady_clock`
+capture) for anything claiming to represent insertion or arrival order.

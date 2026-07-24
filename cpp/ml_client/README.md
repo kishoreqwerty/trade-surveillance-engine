@@ -165,3 +165,28 @@ margin above the worst observed run, not tuned to just barely pass — it
 would still fail a genuine 10x+ hot-path regression. Verified 5/5 clean
 under TSan after the fix, in the same stopped-load conditions.
 condition than "was never reachable to begin with."
+
+## Addendum: MlAnomalyDetector's tumbling window never reset on a backward timestamp jump
+
+Found during Phase 12's harness evaluation work (`cpp/harness/README.md`'s
+"MlAnomalyDetector evaluation" section has the full investigation) —
+`MlAnomalyDetector::handle_order()`'s window-reset condition,
+`order.timestamp_ns - stats.window_start_ns > config_.window_duration_ns`,
+is never true when `order.timestamp_ns` regresses backward past
+`stats.window_start_ns`, since the subtraction goes negative. `WindowStats`
+then keeps accumulating `order_count`/`total_qty`/`cancel_count` into what
+should have been a fresh 60s tumbling window instead — indefinitely, across
+however many session-boundary regressions occur (`cpp/api/main.cpp`'s demo
+feed loop reuses one fixed timestamp anchor per session, so live event
+timestamps genuinely regress at every session boundary; see
+`cpp/pipeline/README.md`). The same bug shape as
+`SpoofingLayeringDetector`'s `AmbientTracker` (front-only pruning assuming
+monotonic timestamps), found independently in a second module.
+
+Fixed by adding `order.timestamp_ns < stats.window_start_ns` as an
+additional reset condition (`cpp/ml_client/ml_anomaly_detector.cpp`).
+Regression test
+`MlAnomalyDetector.WindowResetsOnBackwardTimestampRegressionAcrossASessionBoundary`
+verified fails against the pre-fix code with the real captured value
+(`order_count:10`, accumulated across the regression) before confirming it
+passes against the fix (`order_count:5`, correctly reset).
